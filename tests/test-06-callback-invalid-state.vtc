@@ -1,0 +1,84 @@
+varnishtest "callback with invalid state fails with 403 and no token exchange"
+
+server s_oidc -listen "127.0.0.1:18083" {
+    rxreq
+    expect req.url == "/.well-known/openid-configuration"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "issuer": "http://localhost",
+            "authorization_endpoint": "http://127.0.0.1:18083/authorize",
+            "token_endpoint": "http://127.0.0.1:18083/token",
+            "jwks_uri": "http://127.0.0.1:18083/jwks"
+        }
+    }
+
+    rxreq
+    expect req.url == "/jwks"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "keys":[
+                {"kty":"RSA","alg":"RS256","kid":"test-key","n":"AQAB","e":"AQAB"}
+            ]
+        }
+    }
+} -start
+
+server s_app {
+    rxreq
+    txresp -status 200 -body "ok"
+} -start
+
+varnish v1 -vcl+backend {
+    import oidc from "${vmod}";
+
+    sub vcl_init {
+        new p = oidc.provider(
+            discovery_url = "http://127.0.0.1:18083/.well-known/openid-configuration",
+            client_id = "client-123",
+            client_secret = "secret-xyz",
+            redirect_uri = "http://127.0.0.1:8080/oidc/callback",
+            cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            cookie_secure = false
+        );
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = s_app;
+        if (req.url ~ "^/oidc/callback") {
+            if (!p.callback_state_valid()) {
+                return (synth(403, "Invalid state"));
+            }
+
+            set req.http.X-Set-Cookie = p.exchange_code_for_session(p.callback_code());
+            if (req.http.X-Set-Cookie == "") {
+                return (synth(403, "Token validation failed"));
+            }
+            return (synth(302, "Authenticated"));
+        }
+
+        if (req.url ~ "^/protected/") {
+            if (!p.session_valid()) {
+                return (synth(302, "Login required"));
+            }
+        }
+    }
+
+    sub vcl_synth {
+        if (resp.status == 302 && resp.reason == "Login required") {
+            set resp.http.Location = p.authorization_url();
+            return (deliver);
+        }
+        if (resp.status == 302 && resp.reason == "Authenticated") {
+            set resp.http.Set-Cookie = req.http.X-Set-Cookie;
+            set resp.http.Location = p.callback_redirect_target();
+            return (deliver);
+        }
+    }
+} -start
+
+client c1 {
+    txreq -url "/oidc/callback?code=abc&state=wrong"
+    rxresp
+    expect resp.status == 403
+    expect resp.http.Set-Cookie == <undef>
+} -run

@@ -348,9 +348,17 @@ impl Provider {
             .get("nonce")
             .and_then(Value::as_str)
             .ok_or_else(|| OidcError::InvalidToken("nonce claim missing".to_string()))?;
+        let sub = token_data
+            .claims
+            .get("sub")
+            .and_then(Value::as_str)
+            .ok_or_else(|| OidcError::InvalidToken("sub claim missing".to_string()))?;
 
         if nonce != expected_nonce {
             return Err(OidcError::InvalidToken("nonce mismatch".to_string()));
+        }
+        if sub.is_empty() {
+            return Err(OidcError::InvalidToken("sub claim missing".to_string()));
         }
 
         Ok(token_data.claims)
@@ -981,10 +989,16 @@ fn str_or_bytes_to_string(input: varnish::vcl::StrOrBytes<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use mockito::Matcher;
+    use serde_json::json;
 
     const TEST_SECRET_HEX: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const FIXTURE_RSA_PRIVATE_PEM: &str = include_str!("../fixtures/test-keys/rsa-private.pem");
+    const FIXTURE_WRONG_RSA_PRIVATE_PEM: &str =
+        include_str!("../fixtures/test-keys/wrong-key-private.pem");
+    const FIXTURE_JWKS_JSON: &str = include_str!("../fixtures/test-keys/jwks.json");
 
     fn test_config(discovery_url: String) -> ProviderConfig {
         ProviderConfig {
@@ -1040,6 +1054,40 @@ mod tests {
         (server, provider)
     }
 
+    fn setup_provider_server_with_fixture_jwks() -> (mockito::ServerGuard, Provider, String) {
+        let mut server = mockito::Server::new();
+        let discovery_path = "/.well-known/openid-configuration";
+        let jwks_path = "/jwks";
+        let token_path = "/token";
+
+        server
+            .mock("GET", discovery_path)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                "{{\"issuer\":\"{}\",\"authorization_endpoint\":\"{}/authorize\",\"token_endpoint\":\"{}{}\",\"jwks_uri\":\"{}{}\"}}",
+                server.url(),
+                server.url(),
+                server.url(),
+                token_path,
+                server.url(),
+                jwks_path
+            ))
+            .create();
+
+        server
+            .mock("GET", jwks_path)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(FIXTURE_JWKS_JSON)
+            .create();
+
+        let provider = Provider::new(test_config(format!("{}{}", server.url(), discovery_path)))
+            .expect("provider should initialize");
+
+        (server, provider, token_path.to_string())
+    }
+
     fn cookie_pair_from_set_cookie(set_cookie: &str) -> String {
         set_cookie
             .split(';')
@@ -1047,6 +1095,53 @@ mod tests {
             .expect("set-cookie should contain name=value")
             .trim()
             .to_string()
+    }
+
+    fn sign_token_with_claims(claims: &Value, private_pem: &str, kid: &str) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        let key = EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("valid rsa private key");
+        encode(&header, claims, &key).expect("token should be signed")
+    }
+
+    fn exchange_with_signed_token<F>(token_builder: F) -> String
+    where
+        F: FnOnce(&str, &str) -> String,
+    {
+        let (mut server, provider, token_path) = setup_provider_server_with_fixture_jwks();
+        let start = provider
+            .authorization_url("/protected?x=1")
+            .expect("auth start should work");
+        let state = query_param(&start.url, "state").expect("state must exist");
+        let nonce = query_param(&start.url, "nonce").expect("nonce must exist");
+
+        let token = token_builder(&nonce, &server.url());
+        let token_body = format!(
+            "{{\"id_token\":\"{token}\",\"access_token\":\"abc\",\"token_type\":\"Bearer\"}}"
+        );
+
+        let token_mock = server
+            .mock("POST", token_path.as_str())
+            .match_header(
+                "content-type",
+                Matcher::Regex("application/x-www-form-urlencoded.*".to_string()),
+            )
+            .match_body(Matcher::UrlEncoded(
+                "grant_type".into(),
+                "authorization_code".into(),
+            ))
+            .match_body(Matcher::UrlEncoded("code".into(), "auth-code".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(token_body)
+            .create();
+
+        let callback_url = format!("/oidc/callback?code=auth-code&state={state}");
+        let cookie_header = cookie_pair_from_set_cookie(&start.state_set_cookie);
+        let result =
+            provider.exchange_code_for_session("auth-code", &callback_url, Some(&cookie_header));
+        token_mock.assert();
+        result
     }
 
     #[test]
@@ -1282,5 +1377,102 @@ mod tests {
             Ok(_) => panic!("provider init should fail on invalid cookie secret"),
             Err(err) => assert!(err.to_string().contains("cookie_secret")),
         }
+    }
+
+    #[test]
+    fn exchange_code_for_session_accepts_valid_signed_token() {
+        let set_cookie = exchange_with_signed_token(|nonce, issuer| {
+            let claims = json!({
+                "sub": "1234567890",
+                "email": "user@example.com",
+                "name": "User",
+                "iss": issuer,
+                "aud": "client-123",
+                "iat": now_secs() as i64,
+                "exp": (now_secs() + 300) as i64,
+                "nonce": nonce
+            });
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+
+        assert_ne!(set_cookie, "");
+        let cookie_header = cookie_pair_from_set_cookie(&set_cookie);
+
+        let (_server, provider) = setup_provider_server();
+        assert!(provider.session_valid(Some(&cookie_header)));
+        assert_eq!(
+            provider.claim(Some(&cookie_header), "email"),
+            "user@example.com"
+        );
+    }
+
+    #[test]
+    fn exchange_code_for_session_rejects_invalid_id_token_variants() {
+        let expired = exchange_with_signed_token(|nonce, issuer| {
+            let claims = json!({
+                "sub": "1234567890",
+                "email": "user@example.com",
+                "iss": issuer,
+                "aud": "client-123",
+                "iat": now_secs() as i64,
+                "exp": (now_secs() - 3600) as i64,
+                "nonce": nonce
+            });
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_eq!(expired, "");
+
+        let wrong_aud = exchange_with_signed_token(|nonce, issuer| {
+            let claims = json!({
+                "sub": "1234567890",
+                "email": "user@example.com",
+                "iss": issuer,
+                "aud": "wrong-client",
+                "iat": now_secs() as i64,
+                "exp": (now_secs() + 300) as i64,
+                "nonce": nonce
+            });
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_eq!(wrong_aud, "");
+
+        let wrong_iss = exchange_with_signed_token(|nonce, _issuer| {
+            let claims = json!({
+                "sub": "1234567890",
+                "email": "user@example.com",
+                "iss": "http://wrong-issuer",
+                "aud": "client-123",
+                "iat": now_secs() as i64,
+                "exp": (now_secs() + 300) as i64,
+                "nonce": nonce
+            });
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_eq!(wrong_iss, "");
+
+        let wrong_signature = exchange_with_signed_token(|nonce, issuer| {
+            let claims = json!({
+                "sub": "1234567890",
+                "email": "user@example.com",
+                "iss": issuer,
+                "aud": "client-123",
+                "iat": now_secs() as i64,
+                "exp": (now_secs() + 300) as i64,
+                "nonce": nonce
+            });
+            sign_token_with_claims(&claims, FIXTURE_WRONG_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_eq!(wrong_signature, "");
+
+        let missing_claims = exchange_with_signed_token(|nonce, _issuer| {
+            let claims = json!({
+                "email": "user@example.com",
+                "iat": now_secs() as i64,
+                "exp": (now_secs() + 300) as i64,
+                "nonce": nonce
+            });
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_eq!(missing_claims, "");
     }
 }

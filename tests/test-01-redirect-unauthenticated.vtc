@@ -1,0 +1,78 @@
+varnishtest "oidc redirect for unauthenticated protected request"
+
+server s_oidc -listen "127.0.0.1:18081" {
+    rxreq
+    expect req.url == "/.well-known/openid-configuration"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "issuer": "http://localhost",
+            "authorization_endpoint": "http://127.0.0.1:18081/authorize",
+            "token_endpoint": "http://127.0.0.1:18081/token",
+            "jwks_uri": "http://127.0.0.1:18081/jwks"
+        }
+    }
+
+    rxreq
+    expect req.url == "/jwks"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "keys":[
+                {"kty":"RSA","alg":"RS256","kid":"test-key","n":"AQAB","e":"AQAB"}
+            ]
+        }
+    }
+} -start
+
+server s_app {
+    rxreq
+    txresp -status 200 -body "ok"
+} -start
+
+varnish v1 -vcl+backend {
+    import oidc from "${vmod}";
+
+    sub vcl_init {
+        new p = oidc.provider(
+            discovery_url = "http://127.0.0.1:18081/.well-known/openid-configuration",
+            client_id = "client-123",
+            client_secret = "secret-xyz",
+            redirect_uri = "http://127.0.0.1:8080/oidc/callback",
+            cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            cookie_secure = false,
+            scopes = "openid email profile"
+        );
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = s_app;
+        if (req.url ~ "^/protected/") {
+            if (!p.session_valid()) {
+                return (synth(302, "Login required"));
+            }
+        }
+    }
+
+    sub vcl_synth {
+        if (resp.status == 302 && resp.reason == "Login required") {
+            set resp.http.Location = p.authorization_url();
+            return (deliver);
+        }
+    }
+} -start
+
+client c1 {
+    txreq -url "/protected/resource?x=1"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.Location ~ "^http://.*?/authorize\\?"
+    expect resp.http.Location ~ "response_type=code"
+    expect resp.http.Location ~ "client_id=client-123"
+    expect resp.http.Location ~ "redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Foidc%2Fcallback"
+    expect resp.http.Location ~ "scope=openid\\+email\\+profile"
+    expect resp.http.Location ~ "state="
+    expect resp.http.Location ~ "nonce="
+    expect resp.http.Set-Cookie ~ "__oidc_state="
+    expect resp.http.Set-Cookie ~ "HttpOnly"
+    expect resp.http.Set-Cookie ~ "SameSite=Lax"
+    expect resp.http.Set-Cookie ~ "Path=/"
+} -run

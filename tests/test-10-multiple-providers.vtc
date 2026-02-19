@@ -1,0 +1,124 @@
+varnishtest "multiple oidc providers keep cookie and redirect flows separated"
+
+server s_google -listen "127.0.0.1:18085" {
+    rxreq
+    expect req.url == "/.well-known/openid-configuration"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "issuer": "http://localhost",
+            "authorization_endpoint": "http://127.0.0.1:18085/authorize-google",
+            "token_endpoint": "http://127.0.0.1:18085/token",
+            "jwks_uri": "http://127.0.0.1:18085/jwks"
+        }
+    }
+
+    rxreq
+    expect req.url == "/jwks"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "keys":[
+                {"kty":"RSA","alg":"RS256","kid":"test-key","n":"AQAB","e":"AQAB"}
+            ]
+        }
+    }
+} -start
+
+server s_keycloak -listen "127.0.0.1:18086" {
+    rxreq
+    expect req.url == "/.well-known/openid-configuration"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "issuer": "http://localhost",
+            "authorization_endpoint": "http://127.0.0.1:18086/authorize-keycloak",
+            "token_endpoint": "http://127.0.0.1:18086/token",
+            "jwks_uri": "http://127.0.0.1:18086/jwks"
+        }
+    }
+
+    rxreq
+    expect req.url == "/jwks"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "keys":[
+                {"kty":"RSA","alg":"RS256","kid":"test-key","n":"AQAB","e":"AQAB"}
+            ]
+        }
+    }
+} -start
+
+server s_app {
+    rxreq
+    txresp -status 200 -body "ok"
+} -start
+
+varnish v1 -vcl {
+    backend default {
+        .host = "${s_app_addr}";
+        .port = "${s_app_port}";
+    }
+
+    import oidc from "${vmod}";
+
+    sub vcl_init {
+        new google = oidc.provider(
+            discovery_url = "http://127.0.0.1:18085/.well-known/openid-configuration",
+            client_id = "google-client",
+            client_secret = "google-secret",
+            redirect_uri = "http://127.0.0.1:8080/oidc/google/callback",
+            cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            cookie_name = "__google",
+            cookie_secure = false
+        );
+
+        new keycloak = oidc.provider(
+            discovery_url = "http://127.0.0.1:18086/.well-known/openid-configuration",
+            client_id = "keycloak-client",
+            client_secret = "keycloak-secret",
+            redirect_uri = "http://127.0.0.1:8080/oidc/keycloak/callback",
+            cookie_secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            cookie_name = "__keycloak",
+            cookie_secure = false
+        );
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = default;
+        if (req.url ~ "^/google/") {
+            if (!google.session_valid()) {
+                return (synth(302, "Google login"));
+            }
+        }
+
+        if (req.url ~ "^/keycloak/") {
+            if (!keycloak.session_valid()) {
+                return (synth(302, "Keycloak login"));
+            }
+        }
+    }
+
+    sub vcl_synth {
+        if (resp.status == 302 && resp.reason == "Google login") {
+            set resp.http.Location = google.authorization_url();
+            return (deliver);
+        }
+
+        if (resp.status == 302 && resp.reason == "Keycloak login") {
+            set resp.http.Location = keycloak.authorization_url();
+            return (deliver);
+        }
+    }
+} -start
+
+client c1 {
+    txreq -url "/google/protected"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.Location ~ "/authorize-google"
+    expect resp.http.Set-Cookie ~ "__google_state="
+
+    txreq -url "/keycloak/protected"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.Location ~ "/authorize-keycloak"
+    expect resp.http.Set-Cookie ~ "__keycloak_state="
+} -run

@@ -1,0 +1,123 @@
+varnishtest "callback exchanges code, sets session cookie, and redirects to validated return_to"
+
+server s_oidc -listen "127.0.0.1:18089" {
+    rxreq
+    expect req.url == "/.well-known/openid-configuration"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "issuer": "http://localhost",
+            "authorization_endpoint": "http://127.0.0.1:18089/authorize",
+            "token_endpoint": "http://127.0.0.1:18089/token",
+            "jwks_uri": "http://127.0.0.1:18089/jwks"
+        }
+    }
+
+    rxreq
+    expect req.url == "/jwks"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "keys": [
+                {
+                    "alg": "RS256",
+                    "e": "AQAB",
+                    "kid": "test-key",
+                    "kty": "RSA",
+                    "n": "waqYeBx1ZkMu1pXEA_bkhTeXSiFMeDyQO7VXfIALzy8-WsacyMG-3Oyb9si5uUh-5kFtTb8kcusGL7EcjGq2ZrRAMZLAh1aMk37APPkynQfNfan8ScW8L_i1rme70KEmFqpasiG5IPKqjy3JK3s8qHpu6A-CVQ7Iwcq_dcVcoKB-vEbEoL2XQ-1U7lGvOJa1wxy8Ppzk1T96I2Gh-Hb1w9FPQELkwiKgmd0vO5vmDQ9LqiNkKtoQtwq_yI7oXNwhV13ovVZWu8vf1zV2BdtGd8XtsDQDiF1-lDh-ld0aTn1ctui5dpnEhGQuljp2oaNGswAWDetkxmtP_rVtLu7PLQ",
+                    "use": "sig"
+                }
+            ]
+        }
+    }
+
+    rxreq
+    expect req.url == "/token"
+    expect req.method == "POST"
+    expect req.body ~ "grant_type=authorization_code"
+    expect req.body ~ "code=ok-1"
+    expect req.body ~ "client_id=client-123"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJhdWQiOiJjbGllbnQtMTIzIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3NzE0ODc3MTgsImlzcyI6Imh0dHA6Ly9sb2NhbGhvc3QiLCJuYW1lIjoiVGVzdCBVc2VyIiwibm9uY2UiOiJub25jZS0xMjMiLCJzdWIiOiIxMjM0NTY3ODkwIn0.LO8tEaQNURKb04-icmQJzEJYlZF-7-zk-A9D-2rbT1byW25gOearp9kXyp_GZQrCz3685TepYIhMdp6EupSX07Me4kkZPX2oMVtxWVzejN14dFjerCwZJj5b1dnxkHS6iwfww_31I--BKrbvNvbvQypNBBsoA5K2cPpLVBVszmmhyo4fi44DR7_lJen_E2rO-XcvNeASTNah8qzqqdRuUOINPKsE9RBay4dYkVed6ILSZujgk6wcomXQ-DAv8T1uz0e3qveIW_BRzXqKV4_T7YIUHca_Dlh-ATZZmtZ7yeP26vIeKMM5rvMXCQ34MSvojMZiHjDS15EZpiXdii9Vag"
+        }
+    }
+
+    rxreq
+    expect req.url == "/token"
+    expect req.method == "POST"
+    expect req.body ~ "grant_type=authorization_code"
+    expect req.body ~ "code=ok-2"
+    expect req.body ~ "client_id=client-123"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJhdWQiOiJjbGllbnQtMTIzIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3NzE0ODc3MTgsImlzcyI6Imh0dHA6Ly9sb2NhbGhvc3QiLCJuYW1lIjoiVGVzdCBVc2VyIiwibm9uY2UiOiJub25jZS0xMjMiLCJzdWIiOiIxMjM0NTY3ODkwIn0.LO8tEaQNURKb04-icmQJzEJYlZF-7-zk-A9D-2rbT1byW25gOearp9kXyp_GZQrCz3685TepYIhMdp6EupSX07Me4kkZPX2oMVtxWVzejN14dFjerCwZJj5b1dnxkHS6iwfww_31I--BKrbvNvbvQypNBBsoA5K2cPpLVBVszmmhyo4fi44DR7_lJen_E2rO-XcvNeASTNah8qzqqdRuUOINPKsE9RBay4dYkVed6ILSZujgk6wcomXQ-DAv8T1uz0e3qveIW_BRzXqKV4_T7YIUHca_Dlh-ATZZmtZ7yeP26vIeKMM5rvMXCQ34MSvojMZiHjDS15EZpiXdii9Vag"
+        }
+    }
+} -start
+
+server s_app {
+    rxreq
+    txresp -status 200 -body "ok"
+} -start
+
+varnish v1 -vcl+backend {
+    import oidc from "${vmod}";
+
+    sub vcl_init {
+        new p = oidc.provider(
+            discovery_url = "http://127.0.0.1:18089/.well-known/openid-configuration",
+            client_id = "client-123",
+            client_secret = "secret-xyz",
+            redirect_uri = "http://127.0.0.1:8080/oidc/callback",
+            cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            cookie_secure = false
+        );
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = s_app;
+
+        if (req.url ~ "^/oidc/callback") {
+            if (!p.callback_state_valid()) {
+                return (synth(403, "Invalid state"));
+            }
+
+            set req.http.X-Set-Cookie = p.exchange_code_for_session(p.callback_code());
+            if (req.http.X-Set-Cookie == "") {
+                return (synth(403, "Token validation failed"));
+            }
+            return (synth(302, "Authenticated"));
+        }
+
+        if (req.url ~ "^/protected/") {
+            if (!p.session_valid()) {
+                return (synth(302, "Login required"));
+            }
+        }
+    }
+
+    sub vcl_synth {
+        if (resp.status == 302 && resp.reason == "Login required") {
+            set resp.http.Location = p.authorization_url();
+            return (deliver);
+        }
+        if (resp.status == 302 && resp.reason == "Authenticated") {
+            set resp.http.Set-Cookie = req.http.X-Set-Cookie;
+            set resp.http.Location = p.callback_redirect_target();
+            return (deliver);
+        }
+    }
+} -start
+
+client c1 {
+    txreq -url "/oidc/callback?code=ok-1&state=state-valid" -hdr "Cookie: __oidc_state=v1.AQMFBwkLAAIEBggKjGguXJDaQrm92Yqopx5oIlrJaudcBrF5-3CUTdk50agTWoLjA9BBaWkCChC2lPtrHfc_WTlqoTVpsHK3GQORm_nex68nH_Uhm-IGlhHNqy4LCMycE8NcmdZ2cZ3R5zcB_x9o3uawN-HA2Nkpg2suO44E"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.Set-Cookie ~ "^__oidc=v1\\."
+    expect resp.http.Location == "/protected/resource?x=1"
+
+    txreq -url "/oidc/callback?code=ok-2&state=state-invalid-target" -hdr "Cookie: __oidc_state=v1.CggGBAIACwkHBQMBxa1kB-JpEk_ztYzylYbGdXdq4InlmNdIYExV56Dj_912wHvEstSj1-u2AGKPhu548BDn19Yg8j03mvlamIwTq6TaRwl1gt4pFJvpWZA_6hcQCfmGXaVaIq12CVFl3V4UbM4vOW06RFllgvpdCHKAj9_rm2inM1NKPqfK"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.Set-Cookie ~ "^__oidc=v1\\."
+    expect resp.http.Location == "/"
+} -run

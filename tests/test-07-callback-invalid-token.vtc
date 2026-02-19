@@ -1,0 +1,141 @@
+varnishtest "callback with invalid id token variants fails closed"
+
+server s_oidc -listen "127.0.0.1:18090" {
+    rxreq
+    expect req.url == "/.well-known/openid-configuration"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "issuer": "http://localhost",
+            "authorization_endpoint": "http://127.0.0.1:18090/authorize",
+            "token_endpoint": "http://127.0.0.1:18090/token",
+            "jwks_uri": "http://127.0.0.1:18090/jwks"
+        }
+    }
+
+    rxreq
+    expect req.url == "/jwks"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {
+            "keys": [
+                {
+                    "alg": "RS256",
+                    "e": "AQAB",
+                    "kid": "test-key",
+                    "kty": "RSA",
+                    "n": "waqYeBx1ZkMu1pXEA_bkhTeXSiFMeDyQO7VXfIALzy8-WsacyMG-3Oyb9si5uUh-5kFtTb8kcusGL7EcjGq2ZrRAMZLAh1aMk37APPkynQfNfan8ScW8L_i1rme70KEmFqpasiG5IPKqjy3JK3s8qHpu6A-CVQ7Iwcq_dcVcoKB-vEbEoL2XQ-1U7lGvOJa1wxy8Ppzk1T96I2Gh-Hb1w9FPQELkwiKgmd0vO5vmDQ9LqiNkKtoQtwq_yI7oXNwhV13ovVZWu8vf1zV2BdtGd8XtsDQDiF1-lDh-ld0aTn1ctui5dpnEhGQuljp2oaNGswAWDetkxmtP_rVtLu7PLQ",
+                    "use": "sig"
+                }
+            ]
+        }
+    }
+
+    rxreq
+    expect req.url == "/token"
+    expect req.method == "POST"
+    expect req.body ~ "code=expired"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {"id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJhdWQiOiJjbGllbnQtMTIzIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjo5NDY2ODQ4MDAsImlhdCI6MTc3MTQ4NzcxOCwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdCIsIm5hbWUiOiJUZXN0IFVzZXIiLCJub25jZSI6Im5vbmNlLTEyMyIsInN1YiI6IjEyMzQ1Njc4OTAifQ.RvDK-ObhrhBKmzDqZpSc7JvjgtvweXjTp_0CgofY6picUSLuRkN0ImUVMQCYb__DUTJas1L7Yk1VrLE5o3m31m2bIB6ZBHiwJeAT7eYtAnc83S6pqp9S75lZaF1TXiW8zuP5j-tf3toTCnAol5zrbH8M_hoJvftAwbT8NRK7w4MpbLBjPw8oUtrmc8jlOlMEcOTcfSVbGexqRmms-WzTHqzCE5Av2FVOiZF6S6gOMd9Xbkp4oLnZwqZOx_2KLhNzPUm-PCAKOJU8Ev7f71PxJC2bPw_wXivOt9dO6kTtY9dGHYUdq-MjJuotU_M43r8mljfH0OVV0Sat-RIqTdVo-w"}
+    }
+
+    rxreq
+    expect req.url == "/token"
+    expect req.method == "POST"
+    expect req.body ~ "code=wrong-aud"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {"id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJhdWQiOiJ3cm9uZy1jbGllbnQtaWQiLCJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTc3MTQ4NzcxOCwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdCIsIm5hbWUiOiJUZXN0IFVzZXIiLCJub25jZSI6Im5vbmNlLTEyMyIsInN1YiI6IjEyMzQ1Njc4OTAifQ.vw24OGusfbJjItXO8wgDPvlUPZ8bL4orXSCS7qmhqH0LHuvNGxbvV3Jz1Yav00Xxrb6GuPYDwWneS4LGMKhPAY7v7en8bC3xXlWrxsYMV8KFpS4HeHeH-egaX-cnELJSiUgcYVJHwQAafZxWmZJfNliJPw38MNW3aQi8SmV5CEuUiOYH5XYa1y18fiBMWTPQ5OiQ5TUz5SsG9cx7Mh0TCBMzKEiYxnnD15HBhO2-XYT7kMzly0rWFRBsMczmSblT7sfpLOEhGY5Oj8EBMz5gwhetpFsabUu8Xzu6Zn1AmukKHRoRLIkhB9Q6UUXrsGYJzL7cf4jirEBSvDFEYI4_NA"}
+    }
+
+    rxreq
+    expect req.url == "/token"
+    expect req.method == "POST"
+    expect req.body ~ "code=wrong-iss"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {"id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJhdWQiOiJjbGllbnQtMTIzIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3NzE0ODc3MTgsImlzcyI6Imh0dHA6Ly93cm9uZy1pc3N1ZXIiLCJuYW1lIjoiVGVzdCBVc2VyIiwibm9uY2UiOiJub25jZS0xMjMiLCJzdWIiOiIxMjM0NTY3ODkwIn0.t-PsI69_NWN-4lrZYAtabrzYlIRH7EEn03cTrsucfbKNtxBg4tN1bBGUVpEO5L0katXQRce816mJWy-YH7ktCcp30o9eCpLktTqDPaH2gBjfpJDCXJV6p-yiDBgBM9YG4K_xx7YN8FgmD8SuBWKXo4NUr1xU9IZCMmEpGdi5Obz6sfyxZcqMoikgEkxMXPuvInyPUGEK9I6k7czIYvaCYzaafptJ7yTu4ULIi6F9XEHTpI-5FWiZ6X_UIsiHG-2RJBvi1EvVbupqRnt3Ka7SrB9KpJPdSCtpKDqUYwZX7rQkWNbCTEwRBUw2rscoyv97ez9FIZHJc6YoQCYRoLciOg"}
+    }
+
+    rxreq
+    expect req.url == "/token"
+    expect req.method == "POST"
+    expect req.body ~ "code=wrong-sig"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {"id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJhdWQiOiJjbGllbnQtMTIzIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjo0MTAyNDQ0ODAwLCJpYXQiOjE3NzE0ODc3MTgsImlzcyI6Imh0dHA6Ly9sb2NhbGhvc3QiLCJuYW1lIjoiVGVzdCBVc2VyIiwibm9uY2UiOiJub25jZS0xMjMiLCJzdWIiOiIxMjM0NTY3ODkwIn0.BbpEpblGjxWkU2dkAV7pyoLt-PG2Ybe00IgAA75qRAloea-69iZLLLWeHk3ofw34Cpqd-BlK4h06IXSsVEwfanb0TgcPKEgdzccZoRyBiw9PDVVpmSbvLLmPh3scjyCwMOS6qthq5ftr5m-RvWgyChlTFkzJNPafe57L6fh4B1MixkbZGEN13oVXvqtNWMBNvAZc0xYy3fAEXMfKhDV2pM-U3v0qYGyeV-RLuwYknRnWn17b7wREYnyPSwp1nRMeVm4pipJv30nISNOxtLa2Nfk6mCGLWrDz-H3P67jaQUFY9APhO0cP-0c4Ogef8L2iCVpEgVeu5dEEea91HmU8IA"}
+    }
+
+    rxreq
+    expect req.url == "/token"
+    expect req.method == "POST"
+    expect req.body ~ "code=missing"
+    txresp -status 200 -hdr "Content-Type: application/json" -body {
+        {"id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5In0.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJleHAiOjQxMDI0NDQ4MDAsImlhdCI6MTc3MTQ4NzcxOCwibm9uY2UiOiJub25jZS0xMjMifQ.MpQyuC0FWHnKq0n8KLlerxuUT47xsTbuMH64p7T_yk66WCqoAZBcRHaIrUfX1XnF8nHTpvOWjkyX9GWD3QlMHYf2M6EbWq0DM5B8IUuWLpwQL8IuzS1yU0M-AMj8Yqy3KlFD03ToHKIJEhqWkxRhyeOc1RsIZi9VvHBh2kBqsdPVFtnHqJ8O6p9V-AsmWFKfUMX8x1pfgCgSFNvsybU1hWoTlhO0gMeoqaSNwxqPsqQTUY8X6EIpP7frmGpH5R2vetJ8W4TdNODP4y8zDINLNqHa3Gr9Q5Omitkx8uYcvsK4E4oao5sTxragbi2ZGkcEOnThwWGCVO2s6Y6hYTQjtw"}
+    }
+} -start
+
+server s_app {
+    rxreq
+    txresp -status 200 -body "ok"
+} -start
+
+varnish v1 -vcl+backend {
+    import oidc from "${vmod}";
+
+    sub vcl_init {
+        new p = oidc.provider(
+            discovery_url = "http://127.0.0.1:18090/.well-known/openid-configuration",
+            client_id = "client-123",
+            client_secret = "secret-xyz",
+            redirect_uri = "http://127.0.0.1:8080/oidc/callback",
+            cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            cookie_secure = false
+        );
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = s_app;
+        if (req.url ~ "^/oidc/callback") {
+            if (!p.callback_state_valid()) {
+                return (synth(403, "Invalid state"));
+            }
+
+            set req.http.X-Set-Cookie = p.exchange_code_for_session(p.callback_code());
+            if (req.http.X-Set-Cookie == "") {
+                return (synth(403, "Token validation failed"));
+            }
+            return (synth(302, "Authenticated"));
+        }
+    }
+
+    sub vcl_synth {
+        if (resp.status == 302 && resp.reason == "Authenticated") {
+            set resp.http.Set-Cookie = req.http.X-Set-Cookie;
+            set resp.http.Location = p.callback_redirect_target();
+            return (deliver);
+        }
+    }
+} -start
+
+client c1 {
+    txreq -url "/oidc/callback?code=expired&state=state-expired" -hdr "Cookie: __oidc_state=v1.AgQGCAoAAQMFBwkL2ZRwwQXHH_IroXkwhfrmgq5UwMxmax1_9JBmlRVm3rKiJWZC0YmRP53XOgfVmQWRy6KF2f9IgSBXGcu3xahThhRlmpuvii6DXeF_Uhm3d195A_sREdKgJE0rVg8ANbMiisi6K8q46R31lmJArwOSq6baMnI"
+    rxresp
+    expect resp.status == 403
+    expect resp.http.Set-Cookie == <undef>
+
+    txreq -url "/oidc/callback?code=wrong-aud&state=state-wrong-audience" -hdr "Cookie: __oidc_state=v1.AwYJAAIFCAsBBAcKtAHZXDu0XVe9bh1OFqTqhTpCGA7istK5N2SFSQCp2LVlAoNWOivNzS4G7keM8l29ZhTKUk7Gj4uoY0uqyF1uaHFKmb5ZtKdKQDsvzrTOhCUAlaoOi3qNjIlvcFm97zqvey5XIqTr05hslQKRd_KkfTU7lual-crmI0BE"
+    rxresp
+    expect resp.status == 403
+    expect resp.http.Set-Cookie == <undef>
+
+    txreq -url "/oidc/callback?code=wrong-iss&state=state-wrong-issuer" -hdr "Cookie: __oidc_state=v1.BAgBBQkCBgoDBwsAyp0meCrGRYpxPMdYYFHCHir3dU6-9hd3c736rlUarrZu8IEfTpgNuX70bmRPWKnoRp3H-as2g6l5NFITMeFAvSdkKd5viP1FjdBm_y4am-AkP0MUrnJvajDfS_Ug2xOydxgEZ5i5_ZZebY20-Yf-9BV1yfrc05_yaw"
+    rxresp
+    expect resp.status == 403
+    expect resp.http.Set-Cookie == <undef>
+
+    txreq -url "/oidc/callback?code=wrong-sig&state=state-wrong-signature" -hdr "Cookie: __oidc_state=v1.BQoECQMIAgcBBgALjtnJYE45BtKrew7guPMeUH1KGlmFtPOEoCDYJnbW5fbvrBSD29yHp94WZP2VpyYmoV8SP8yHvetQ7ygj199LsEZXv6fVuZQhFjzFUHNBEJHYgxWJIBMHh0N1QVuhVREUFlOKpfEeR8ZS5grB68vqLnWYSouceL1sTzgeUg"
+    rxresp
+    expect resp.status == 403
+    expect resp.http.Set-Cookie == <undef>
+
+    txreq -url "/oidc/callback?code=missing&state=state-missing-claims" -hdr "Cookie: __oidc_state=v1.BgAHAQgCCQMKBAsFfDGem0SQKFDclpILm3Okx0oLA_9WTuQw_E69ZjB5r5XruwWCG_PrK3oEH2yI0MNDlz3lrhKdUC57Pzk1pNIIFRIVL1D3djqyWaQuhTCha9cX1NGe23MVu8TgCuKSCFy7ANEeOYQ-SG18jlmx5G6KzR-SOm_n-5GmyA4D"
+    rxresp
+    expect resp.status == 403
+    expect resp.http.Set-Cookie == <undef>
+} -run
