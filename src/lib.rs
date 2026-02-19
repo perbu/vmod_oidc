@@ -473,7 +473,7 @@ impl Provider {
         let raw_state_cookie = cookie_value(cookie_header, &self.config.state_cookie_name)
             .ok_or(OidcError::InvalidState)?;
 
-        let state: StateCookie = self.cookie_cipher.decrypt_json(&raw_state_cookie)?;
+        let state: StateCookie = self.cookie_cipher.decrypt_json(raw_state_cookie)?;
         if state.exp <= now_secs() {
             return Err(OidcError::InvalidState);
         }
@@ -491,11 +491,12 @@ impl Provider {
     ) -> Result<Map<String, Value>, OidcError> {
         let raw_cookie = cookie_value(cookie_header, &self.config.cookie_name)
             .ok_or_else(|| OidcError::InvalidToken("session cookie missing".to_string()))?;
-        let claims: Value = self.cookie_cipher.decrypt_json(&raw_cookie)?;
-        let obj = claims
-            .as_object()
-            .ok_or_else(|| OidcError::InvalidToken("claims payload must be an object".to_string()))?
-            .clone();
+        let claims: Value = self.cookie_cipher.decrypt_json(raw_cookie)?;
+        let Value::Object(obj) = claims else {
+            return Err(OidcError::InvalidToken(
+                "claims payload must be an object".to_string(),
+            ));
+        };
 
         let exp = obj
             .get("exp")
@@ -676,16 +677,16 @@ fn fetch_jwks_cache(client: &Client, jwks_uri: &str) -> Result<JwksCache, OidcEr
             continue;
         }
 
-        if let Some(alg) = key.alg.as_deref() {
-            if alg != "RS256" {
-                continue;
-            }
+        if let Some(alg) = key.alg.as_deref()
+            && alg != "RS256"
+        {
+            continue;
         }
 
-        if let Some(u) = key.key_use.as_deref() {
-            if u != "sig" {
-                continue;
-            }
+        if let Some(u) = key.key_use.as_deref()
+            && u != "sig"
+        {
+            continue;
         }
 
         let n = match key.n {
@@ -797,19 +798,19 @@ fn decode_cookie_secret(secret: &str) -> Result<[u8; 32], OidcError> {
 
     let mut first_match: Option<(&str, Vec<u8>)> = None;
     for (name, candidate) in decoders {
-        if let Some(bytes) = candidate {
-            if bytes.len() == 32 {
-                if let Some((prev_name, ref prev_bytes)) = first_match {
-                    if prev_bytes != bytes {
-                        return Err(OidcError::InvalidConfig(format!(
-                            "cookie_secret is ambiguous: valid as both {prev_name} and {name} \
-                             with different results. Use an explicit prefix (e.g. '{prev_name}:' \
-                             or '{name}:')"
-                        )));
-                    }
-                } else {
-                    first_match = Some((name, bytes.clone()));
+        if let Some(bytes) = candidate
+            && bytes.len() == 32
+        {
+            if let Some((prev_name, ref prev_bytes)) = first_match {
+                if prev_bytes != bytes {
+                    return Err(OidcError::InvalidConfig(format!(
+                        "cookie_secret is ambiguous: valid as both {prev_name} and {name} \
+                         with different results. Use an explicit prefix (e.g. '{prev_name}:' \
+                         or '{name}:')"
+                    )));
                 }
+            } else {
+                first_match = Some((name, bytes.clone()));
             }
         }
     }
@@ -839,12 +840,12 @@ fn decode_cookie_secret_bytes(bytes: &[u8]) -> Result<[u8; 32], OidcError> {
     Ok(key)
 }
 
-fn cookie_value(cookie_header: Option<&str>, cookie_name: &str) -> Option<String> {
+fn cookie_value<'a>(cookie_header: Option<&'a str>, cookie_name: &str) -> Option<&'a str> {
     cookie_header.and_then(|cookie_header| {
         cookie_header.split(';').find_map(|part| {
             let (name, value) = part.trim().split_once('=')?;
             if name == cookie_name {
-                Some(value.to_string())
+                Some(value)
             } else {
                 None
             }
@@ -1099,8 +1100,7 @@ mod oidc {
         /// Returns `FALSE` if the cookie is missing, expired, tampered with, or
         /// encrypted with a different key.
         pub fn session_valid(&self, ctx: &Ctx) -> bool {
-            self.inner
-                .session_valid(super::cookie_header_from_ctx(ctx).as_deref())
+            super::with_cookie_header(ctx, |cookie| self.inner.session_valid(cookie))
         }
 
         /// Returns the value of a named claim from the session cookie.
@@ -1117,8 +1117,7 @@ mod oidc {
             /// The claim name to look up (e.g., `"email"`, `"sub"`, `"name"`).
             name: &str,
         ) -> String {
-            self.inner
-                .claim(super::cookie_header_from_ctx(ctx).as_deref(), name)
+            super::with_cookie_header(ctx, |cookie| self.inner.claim(cookie, name))
         }
 
         /// Returns the full authorization URL to redirect the user to the identity
@@ -1131,8 +1130,10 @@ mod oidc {
         /// Returns an empty string on internal error (e.g., failed to set the
         /// state cookie on the response).
         pub fn authorization_url(&self, ctx: &mut Ctx) -> String {
-            let req_url = super::request_url_from_ctx(ctx).unwrap_or_else(|| "/".to_string());
-            let start = match self.inner.authorization_url(&req_url) {
+            let start = super::with_request_url(ctx, |url| {
+                self.inner.authorization_url(url.unwrap_or("/"))
+            });
+            let start = match start {
                 Ok(start) => start,
                 Err(_) => return String::new(),
             };
@@ -1148,18 +1149,18 @@ mod oidc {
         ///
         /// Returns an empty string if the parameter is missing.
         pub fn callback_code(&self, ctx: &Ctx) -> String {
-            super::request_url_from_ctx(ctx)
-                .map(|url| self.inner.callback_code(&url))
-                .unwrap_or_default()
+            super::with_request_url(ctx, |url| {
+                url.map(|u| self.inner.callback_code(u)).unwrap_or_default()
+            })
         }
 
         /// Extracts the `state` query parameter from the current callback request URL.
         ///
         /// Returns an empty string if the parameter is missing.
         pub fn callback_state(&self, ctx: &Ctx) -> String {
-            super::request_url_from_ctx(ctx)
-                .map(|url| self.inner.callback_state(&url))
-                .unwrap_or_default()
+            super::with_request_url(ctx, |url| {
+                url.map(|u| self.inner.callback_state(u)).unwrap_or_default()
+            })
         }
 
         /// Validates the OIDC callback by checking that the `state` query parameter
@@ -1169,11 +1170,12 @@ mod oidc {
         /// or does not match the `state` parameter. This is a CSRF protection check
         /// and should be called before `exchange_code_for_session()`.
         pub fn callback_state_valid(&self, ctx: &Ctx) -> bool {
-            let Some(url) = super::request_url_from_ctx(ctx) else {
-                return false;
-            };
-            self.inner
-                .callback_state_valid(&url, super::cookie_header_from_ctx(ctx).as_deref())
+            super::with_request_url(ctx, |url| {
+                let Some(url) = url else { return false };
+                super::with_cookie_header(ctx, |cookie| {
+                    self.inner.callback_state_valid(url, cookie)
+                })
+            })
         }
 
         /// Exchanges an authorization code for an ID token, validates the token,
@@ -1196,14 +1198,12 @@ mod oidc {
             /// Typically obtained via `callback_code()`.
             code: &str,
         ) -> String {
-            let Some(url) = super::request_url_from_ctx(ctx) else {
-                return String::new();
-            };
-            self.inner.exchange_code_for_session(
-                code,
-                &url,
-                super::cookie_header_from_ctx(ctx).as_deref(),
-            )
+            super::with_request_url(ctx, |url| {
+                let Some(url) = url else { return String::new() };
+                super::with_cookie_header(ctx, |cookie| {
+                    self.inner.exchange_code_for_session(code, url, cookie)
+                })
+            })
         }
 
         /// Returns the original URL path the user was trying to access before
@@ -1216,37 +1216,64 @@ mod oidc {
         /// Use this as the `Location` header when redirecting the user after
         /// successful authentication.
         pub fn callback_redirect_target(&self, ctx: &Ctx) -> String {
-            let Some(url) = super::request_url_from_ctx(ctx) else {
-                return "/".to_string();
-            };
-            self.inner
-                .callback_redirect_target(&url, super::cookie_header_from_ctx(ctx).as_deref())
+            super::with_request_url(ctx, |url| {
+                let Some(url) = url else {
+                    return "/".to_string();
+                };
+                super::with_cookie_header(ctx, |cookie| {
+                    self.inner.callback_redirect_target(url, cookie)
+                })
+            })
         }
     }
 }
 
 #[cfg(feature = "vmod")]
-fn request_url_from_ctx(ctx: &varnish::vcl::Ctx) -> Option<String> {
-    [
+fn with_request_url<F, R>(ctx: &varnish::vcl::Ctx, f: F) -> R
+where
+    F: FnOnce(Option<&str>) -> R,
+{
+    let sob = [
         ctx.http_req.as_ref(),
         ctx.http_req_top.as_ref(),
         ctx.http_bereq.as_ref(),
     ]
     .into_iter()
     .flatten()
-    .find_map(|headers| headers.url().map(str_or_bytes_to_string))
+    .find_map(|headers| headers.url());
+
+    match sob {
+        None => f(None),
+        Some(varnish::vcl::StrOrBytes::Utf8(s)) => f(Some(s)),
+        Some(varnish::vcl::StrOrBytes::Bytes(b)) => match std::str::from_utf8(b) {
+            Ok(s) => f(Some(s)),
+            Err(_) => f(None),
+        },
+    }
 }
 
 #[cfg(feature = "vmod")]
-fn cookie_header_from_ctx(ctx: &varnish::vcl::Ctx) -> Option<String> {
-    [
+fn with_cookie_header<F, R>(ctx: &varnish::vcl::Ctx, f: F) -> R
+where
+    F: FnOnce(Option<&str>) -> R,
+{
+    let sob = [
         ctx.http_req.as_ref(),
         ctx.http_req_top.as_ref(),
         ctx.http_bereq.as_ref(),
     ]
     .into_iter()
     .flatten()
-    .find_map(|headers| headers.header("Cookie").map(str_or_bytes_to_string))
+    .find_map(|headers| headers.header("Cookie"));
+
+    match sob {
+        None => f(None),
+        Some(varnish::vcl::StrOrBytes::Utf8(s)) => f(Some(s)),
+        Some(varnish::vcl::StrOrBytes::Bytes(b)) => match std::str::from_utf8(b) {
+            Ok(s) => f(Some(s)),
+            Err(_) => f(None),
+        },
+    }
 }
 
 #[cfg(feature = "vmod")]
@@ -1255,11 +1282,6 @@ fn set_response_cookie_on_ctx(ctx: &mut varnish::vcl::Ctx, value: &str) -> bool 
         return false;
     };
     resp.set_header("Set-Cookie", value).is_ok()
-}
-
-#[cfg(feature = "vmod")]
-fn str_or_bytes_to_string(input: varnish::vcl::StrOrBytes<'_>) -> String {
-    String::from_utf8_lossy(input.as_ref()).into_owned()
 }
 
 #[cfg(test)]
