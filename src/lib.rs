@@ -531,6 +531,8 @@ struct Jwk {
     kty: String,
     #[serde(default)]
     alg: Option<String>,
+    #[serde(default, rename = "use")]
+    key_use: Option<String>,
     #[serde(default)]
     n: Option<String>,
     #[serde(default)]
@@ -680,6 +682,12 @@ fn fetch_jwks_cache(client: &Client, jwks_uri: &str) -> Result<JwksCache, OidcEr
             }
         }
 
+        if let Some(u) = key.key_use.as_deref() {
+            if u != "sig" {
+                continue;
+            }
+        }
+
         let n = match key.n {
             Some(v) if !v.trim().is_empty() => v,
             _ => continue,
@@ -745,25 +753,90 @@ fn build_set_cookie(name: &str, value: &str, max_age_secs: u64, secure: bool) ->
 fn decode_cookie_secret(secret: &str) -> Result<[u8; 32], OidcError> {
     let value = secret.trim();
 
-    let candidates = [
-        hex::decode(value).ok(),
-        STANDARD.decode(value).ok(),
-        URL_SAFE.decode(value).ok(),
-        STANDARD_NO_PAD.decode(value).ok(),
-        URL_SAFE_NO_PAD.decode(value).ok(),
+    // Explicit format prefix removes all ambiguity.
+    if let Some(hex_str) = value.strip_prefix("hex:") {
+        return decode_cookie_secret_bytes(
+            &hex::decode(hex_str).map_err(|_| {
+                OidcError::InvalidConfig("cookie_secret: invalid hex after 'hex:' prefix".into())
+            })?,
+        );
+    }
+    if let Some(b64_str) = value.strip_prefix("base64:") {
+        return decode_cookie_secret_bytes(
+            &STANDARD
+                .decode(b64_str)
+                .or_else(|_| STANDARD_NO_PAD.decode(b64_str))
+                .map_err(|_| {
+                    OidcError::InvalidConfig(
+                        "cookie_secret: invalid base64 after 'base64:' prefix".into(),
+                    )
+                })?,
+        );
+    }
+    if let Some(b64url_str) = value.strip_prefix("base64url:") {
+        return decode_cookie_secret_bytes(
+            &URL_SAFE
+                .decode(b64url_str)
+                .or_else(|_| URL_SAFE_NO_PAD.decode(b64url_str))
+                .map_err(|_| {
+                    OidcError::InvalidConfig(
+                        "cookie_secret: invalid base64url after 'base64url:' prefix".into(),
+                    )
+                })?,
+        );
+    }
+
+    // No prefix: auto-detect, but reject if ambiguous.
+    let decoders: &[(&str, Option<Vec<u8>>)] = &[
+        ("hex", hex::decode(value).ok()),
+        ("base64", STANDARD.decode(value).ok()),
+        ("base64url", URL_SAFE.decode(value).ok()),
+        ("base64", STANDARD_NO_PAD.decode(value).ok()),
+        ("base64url", URL_SAFE_NO_PAD.decode(value).ok()),
     ];
 
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.len() == 32 {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&candidate);
-            return Ok(key);
+    let mut first_match: Option<(&str, Vec<u8>)> = None;
+    for (name, candidate) in decoders {
+        if let Some(bytes) = candidate {
+            if bytes.len() == 32 {
+                if let Some((prev_name, ref prev_bytes)) = first_match {
+                    if prev_bytes != bytes {
+                        return Err(OidcError::InvalidConfig(format!(
+                            "cookie_secret is ambiguous: valid as both {prev_name} and {name} \
+                             with different results. Use an explicit prefix (e.g. '{prev_name}:' \
+                             or '{name}:')"
+                        )));
+                    }
+                } else {
+                    first_match = Some((name, bytes.clone()));
+                }
+            }
         }
     }
 
+    if let Some((_name, bytes)) = first_match {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Ok(key);
+    }
+
     Err(OidcError::InvalidConfig(
-        "cookie_secret must decode to exactly 32 bytes (hex/base64/base64url)".to_string(),
+        "cookie_secret must decode to exactly 32 bytes (hex/base64/base64url). \
+         You may use a prefix (hex:, base64:, base64url:) to specify the format."
+            .to_string(),
     ))
+}
+
+fn decode_cookie_secret_bytes(bytes: &[u8]) -> Result<[u8; 32], OidcError> {
+    if bytes.len() != 32 {
+        return Err(OidcError::InvalidConfig(format!(
+            "cookie_secret must decode to exactly 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(bytes);
+    Ok(key)
 }
 
 fn cookie_value(cookie_header: Option<&str>, cookie_name: &str) -> Option<String> {
@@ -1677,5 +1750,70 @@ mod tests {
             sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
         });
         assert_eq!(missing_claims, "");
+    }
+
+    #[test]
+    fn decode_cookie_secret_with_hex_prefix() {
+        let key = decode_cookie_secret(
+            "hex:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        assert_eq!(
+            key,
+            hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap()
+                .as_slice()
+        );
+    }
+
+    #[test]
+    fn decode_cookie_secret_with_base64_prefix() {
+        // 32 bytes encoded as standard base64
+        let raw = [0xABu8; 32];
+        let encoded = STANDARD.encode(raw);
+        let key = decode_cookie_secret(&format!("base64:{encoded}")).unwrap();
+        assert_eq!(key, raw);
+    }
+
+    #[test]
+    fn decode_cookie_secret_with_base64url_prefix() {
+        let raw = [0xCDu8; 32];
+        let encoded = URL_SAFE_NO_PAD.encode(raw);
+        let key = decode_cookie_secret(&format!("base64url:{encoded}")).unwrap();
+        assert_eq!(key, raw);
+    }
+
+    #[test]
+    fn decode_cookie_secret_prefix_wrong_length_rejected() {
+        // 16 bytes hex = 32 hex chars, but decodes to only 16 bytes
+        let err = decode_cookie_secret("hex:0123456789abcdef0123456789abcdef").unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn decode_cookie_secret_prefix_invalid_encoding_rejected() {
+        let err = decode_cookie_secret("hex:not-valid-hex!!").unwrap_err();
+        assert!(err.to_string().contains("invalid hex"));
+
+        let err = decode_cookie_secret("base64:not valid base64!!!").unwrap_err();
+        assert!(err.to_string().contains("invalid base64"));
+
+        let err = decode_cookie_secret("base64url:not valid base64!!!").unwrap_err();
+        assert!(err.to_string().contains("invalid base64url"));
+    }
+
+    #[test]
+    fn decode_cookie_secret_unprefixed_hex_still_works() {
+        // Backward compat: plain 64-char hex string
+        let key = decode_cookie_secret(TEST_SECRET_HEX).unwrap();
+        assert_eq!(key, hex::decode(TEST_SECRET_HEX).unwrap().as_slice());
+    }
+
+    #[test]
+    fn decode_cookie_secret_unprefixed_base64_still_works() {
+        let raw = [0x42u8; 32];
+        let encoded = STANDARD.encode(raw);
+        let key = decode_cookie_secret(&encoded).unwrap();
+        assert_eq!(key, raw);
     }
 }
