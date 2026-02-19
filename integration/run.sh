@@ -17,7 +17,7 @@ echo "Waiting for Keycloak to be ready (up to 120s)..."
 TIMEOUT=120
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    if curl -sf http://localhost:18080/health/ready > /dev/null 2>&1; then
+    if curl -sf http://localhost:19000/health/ready > /dev/null 2>&1; then
         echo "Keycloak is ready (${ELAPSED}s)"
         break
     fi

@@ -4,15 +4,17 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
     command:
       - start-dev
       - --import-realm
     ports:
       - "18080:8080"
+      - "19000:9000"
     volumes:
       - ./keycloak/test-realm.json:/opt/keycloak/data/import/test-realm.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000"]
       interval: 5s
       timeout: 3s
       retries: 30
