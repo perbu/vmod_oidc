@@ -382,6 +382,7 @@ impl Provider {
 
     fn refresh_jwks(&self, required_for_request: bool) -> Result<(), OidcError> {
         let now = now_secs();
+        let prev_expires_at;
         {
             let cache = self
                 .jwks_cache
@@ -397,6 +398,8 @@ impl Provider {
             if !required_for_request && now < cache.expires_at {
                 return Ok(());
             }
+
+            prev_expires_at = cache.expires_at;
         }
 
         match fetch_jwks_cache(&self.client, &self.discovery.jwks_uri) {
@@ -405,7 +408,10 @@ impl Provider {
                     .jwks_cache
                     .lock()
                     .map_err(|_| OidcError::InvalidToken("jwks mutex poisoned".to_string()))?;
-                *cache = new_cache;
+                // Only update if no other thread refreshed while we were fetching.
+                if cache.expires_at == prev_expires_at {
+                    *cache = new_cache;
+                }
                 Ok(())
             }
             Err(err) => {
@@ -413,10 +419,13 @@ impl Provider {
                     .jwks_cache
                     .lock()
                     .map_err(|_| OidcError::InvalidToken("jwks mutex poisoned".to_string()))?;
-                cache.refresh_failures = cache.refresh_failures.saturating_add(1);
-                let exponent = cmp::min(cache.refresh_failures, 6);
-                let backoff = 1u64 << exponent;
-                cache.backoff_until = now_secs() + cmp::min(backoff, 60);
+                // Only set backoff if no other thread refreshed successfully.
+                if cache.expires_at == prev_expires_at {
+                    cache.refresh_failures = cache.refresh_failures.saturating_add(1);
+                    let exponent = cmp::min(cache.refresh_failures, 6);
+                    let backoff = 1u64 << exponent;
+                    cache.backoff_until = now_secs() + cmp::min(backoff, 60);
+                }
                 Err(err)
             }
         }
@@ -838,31 +847,156 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// An OIDC provider instance that handles authentication against a single
+/// OpenID Connect identity provider.
+///
+/// Created during `vcl_init` by providing the provider's discovery URL,
+/// client credentials, and cookie configuration. The provider fetches the
+/// discovery document and JWKS at initialization time — if either fails,
+/// `vcl_init` fails (fail-closed startup).
+///
+/// A single Varnish instance can have multiple provider objects for
+/// different identity providers (e.g., Google and Keycloak), each with
+/// its own cookie name and configuration.
 #[cfg(feature = "vmod")]
 #[allow(non_camel_case_types)]
 pub struct provider {
     inner: Provider,
 }
 
+/// OpenID Connect authentication for Varnish Cache.
+///
+/// This VMOD allows Varnish to act as an OpenID Connect Relying Party,
+/// authenticating users against any OIDC-compliant identity provider
+/// (Google, Microsoft Entra ID, Keycloak, Auth0, etc.) before serving
+/// cached content.
+///
+/// # How it works
+///
+/// The VMOD implements the standard OIDC Authorization Code flow:
+///
+/// 1. An unauthenticated request arrives at a protected path.
+/// 2. VCL calls `session_valid()` which returns `FALSE` (no valid cookie).
+/// 3. VCL calls `authorization_url()` and redirects the user to the identity provider.
+/// 4. The user authenticates with the provider and is redirected back with an authorization code.
+/// 5. VCL calls `exchange_code_for_session(code)` which exchanges the code for an ID token,
+///    validates it, and returns a `Set-Cookie` header containing the encrypted session.
+/// 6. Subsequent requests include the session cookie; `session_valid()` returns `TRUE` and
+///    individual claims (email, name, etc.) are available via `claim()`.
+///
+/// # Session model
+///
+/// Sessions are **stateless and cookie-based**. The full set of ID token claims is
+/// AES-256-GCM encrypted and stored directly in the cookie. No external session store
+/// (Redis, memcached, etc.) is needed. Sessions survive Varnish restarts and work across
+/// multiple Varnish instances sharing the same `cookie_secret`.
+///
+/// Session revocation is not supported in v1 — a session is valid until it expires.
+///
+/// # Security properties
+///
+/// - **Fail-closed**: all validation failures return empty string or `FALSE`. Partial
+///   data is never leaked.
+/// - **Issuer validation**: always enabled; the `iss` claim must match the discovery document.
+/// - **Nonce binding**: the `nonce` in the ID token must match the nonce stored in the state cookie.
+/// - **Cookie protection**: session and state cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`,
+///   and `Secure` by default. Contents are encrypted and authenticated with AES-256-GCM.
+/// - **JWKS rotation**: unknown key IDs trigger an automatic JWKS refresh with exponential backoff.
+///
+/// # VCL example
+///
+/// ```vcl
+/// import oidc;
+///
+/// sub vcl_init {
+///     new google = oidc.provider(
+///         discovery_url = "https://accounts.google.com/.well-known/openid-configuration",
+///         client_id     = "your-client-id.apps.googleusercontent.com",
+///         client_secret = "your-client-secret",
+///         redirect_uri  = "https://example.com/oidc/callback",
+///         cookie_secret = "hex-or-base64-encoded-32-byte-key"
+///     );
+/// }
+///
+/// sub vcl_recv {
+///     // Handle the OIDC callback
+///     if (req.url ~ "^/oidc/callback") {
+///         if (!google.callback_state_valid()) {
+///             return (synth(403, "Invalid state"));
+///         }
+///         set req.http.X-Set-Cookie = google.exchange_code_for_session(
+///             google.callback_code()
+///         );
+///         if (req.http.X-Set-Cookie == "") {
+///             return (synth(403, "Authentication failed"));
+///         }
+///         return (synth(302, "Authenticated"));
+///     }
+///
+///     // Protect specific paths
+///     if (req.url ~ "^/protected/") {
+///         if (!google.session_valid()) {
+///             return (synth(302, "Login required"));
+///         }
+///         set req.http.X-User-Email = google.claim("email");
+///     }
+/// }
+///
+/// sub vcl_synth {
+///     if (resp.status == 302 && resp.reason == "Login required") {
+///         set resp.http.Location = google.authorization_url();
+///         return (deliver);
+///     }
+///     if (resp.status == 302 && resp.reason == "Authenticated") {
+///         set resp.http.Set-Cookie = req.http.X-Set-Cookie;
+///         set resp.http.Location = google.callback_redirect_target();
+///         return (deliver);
+///     }
+/// }
+/// ```
 #[cfg(feature = "vmod")]
-#[varnish::vmod]
+#[varnish::vmod(docs = "README.md")]
 mod oidc {
     use super::{Provider, ProviderConfig, provider};
     use std::time::Duration;
     use varnish::vcl::Ctx;
 
     impl provider {
+        /// Create a new OIDC provider by fetching and validating the discovery document
+        /// and JWKS from the identity provider. This is called during `vcl_init`.
+        ///
+        /// If the discovery document or JWKS cannot be fetched, initialization fails
+        /// and Varnish will not start (fail-closed).
+        ///
+        /// The `cookie_secret` must decode to exactly 32 bytes. It accepts hex,
+        /// base64, or base64url encoding. Generate one with:
+        /// `openssl rand -hex 32`
         #[expect(clippy::too_many_arguments)]
         pub fn new(
+            /// The OIDC discovery endpoint URL, typically ending in
+            /// `/.well-known/openid-configuration`.
             discovery_url: &str,
+            /// The OAuth 2.0 client ID registered with the identity provider.
             client_id: &str,
+            /// The OAuth 2.0 client secret registered with the identity provider.
             client_secret: &str,
+            /// The absolute URL the provider will redirect to after authentication.
+            /// Must match the redirect URI registered with the provider.
             redirect_uri: &str,
+            /// A 32-byte secret used for AES-256-GCM encryption of session and
+            /// state cookies. Accepts hex, base64, or base64url encoding.
             cookie_secret: &str,
+            /// Name of the session cookie. Defaults to `__oidc`.
             cookie_name: Option<&str>,
+            /// Session cookie lifetime. Defaults to 1 hour.
             cookie_ttl: Option<Duration>,
+            /// State cookie lifetime (used during the login flow). Defaults to 5 minutes.
             state_cookie_ttl: Option<Duration>,
+            /// Whether to set the `Secure` flag on cookies. Defaults to `true`.
+            /// Set to `false` only for local development over plain HTTP.
             cookie_secure: Option<bool>,
+            /// Space-separated list of OAuth scopes to request. Defaults to `"openid"`.
+            /// Common additions: `"openid email profile"`.
             scopes: Option<&str>,
         ) -> Result<Self, String> {
             let config = ProviderConfig {
@@ -884,16 +1018,43 @@ mod oidc {
                 .map_err(|err| err.to_string())
         }
 
+        /// Returns `TRUE` if the request carries a valid, non-expired session cookie.
+        ///
+        /// Use this in `vcl_recv` to decide whether a request is authenticated.
+        /// Returns `FALSE` if the cookie is missing, expired, tampered with, or
+        /// encrypted with a different key.
         pub fn session_valid(&self, ctx: &Ctx) -> bool {
             self.inner
                 .session_valid(super::cookie_header_from_ctx(ctx).as_deref())
         }
 
-        pub fn claim(&self, ctx: &Ctx, name: &str) -> String {
+        /// Returns the value of a named claim from the session cookie.
+        ///
+        /// String and numeric claims are returned as plain strings. Array and
+        /// object claims are returned as compact JSON. Returns an empty string
+        /// if the session is invalid or the claim does not exist.
+        ///
+        /// ```vcl
+        /// set req.http.X-User-Email = google.claim("email");
+        /// set req.http.X-User-Sub   = google.claim("sub");
+        /// ```
+        pub fn claim(&self, ctx: &Ctx,
+            /// The claim name to look up (e.g., `"email"`, `"sub"`, `"name"`).
+            name: &str,
+        ) -> String {
             self.inner
                 .claim(super::cookie_header_from_ctx(ctx).as_deref(), name)
         }
 
+        /// Returns the full authorization URL to redirect the user to the identity
+        /// provider. As a side effect, sets a short-lived state cookie on the response
+        /// containing the CSRF state token, nonce, and the return-to path.
+        ///
+        /// Call this in `vcl_synth` when an unauthenticated user needs to log in,
+        /// and use the returned URL as the `Location` header for a 302 redirect.
+        ///
+        /// Returns an empty string on internal error (e.g., failed to set the
+        /// state cookie on the response).
         pub fn authorization_url(&self, ctx: &mut Ctx) -> String {
             let req_url = super::request_url_from_ctx(ctx).unwrap_or_else(|| "/".to_string());
             let start = match self.inner.authorization_url(&req_url) {
@@ -908,18 +1069,30 @@ mod oidc {
             start.url
         }
 
+        /// Extracts the `code` query parameter from the current callback request URL.
+        ///
+        /// Returns an empty string if the parameter is missing.
         pub fn callback_code(&self, ctx: &Ctx) -> String {
             super::request_url_from_ctx(ctx)
                 .map(|url| self.inner.callback_code(&url))
                 .unwrap_or_default()
         }
 
+        /// Extracts the `state` query parameter from the current callback request URL.
+        ///
+        /// Returns an empty string if the parameter is missing.
         pub fn callback_state(&self, ctx: &Ctx) -> String {
             super::request_url_from_ctx(ctx)
                 .map(|url| self.inner.callback_state(&url))
                 .unwrap_or_default()
         }
 
+        /// Validates the OIDC callback by checking that the `state` query parameter
+        /// matches the value stored in the encrypted state cookie.
+        ///
+        /// Returns `FALSE` if the state cookie is missing, expired, tampered with,
+        /// or does not match the `state` parameter. This is a CSRF protection check
+        /// and should be called before `exchange_code_for_session()`.
         pub fn callback_state_valid(&self, ctx: &Ctx) -> bool {
             let Some(url) = super::request_url_from_ctx(ctx) else {
                 return false;
@@ -928,7 +1101,26 @@ mod oidc {
                 .callback_state_valid(&url, super::cookie_header_from_ctx(ctx).as_deref())
         }
 
-        pub fn exchange_code_for_session(&self, ctx: &Ctx, code: &str) -> String {
+        /// Exchanges an authorization code for an ID token, validates the token,
+        /// and returns a `Set-Cookie` header value containing the encrypted session.
+        ///
+        /// This method performs the following steps:
+        /// 1. Validates the state cookie (CSRF check).
+        /// 2. POSTs the authorization code to the provider's token endpoint.
+        /// 3. Validates the returned ID token (signature, issuer, audience, expiry, nonce).
+        /// 4. Encrypts the ID token claims into a session cookie.
+        ///
+        /// Returns an empty string on any failure (network error, invalid token,
+        /// state mismatch, etc.). The VCL should check for an empty return value
+        /// and respond with a 403 or similar error.
+        ///
+        /// The returned string is a complete `Set-Cookie` header value that should
+        /// be set on the response (e.g., `set resp.http.Set-Cookie = ...`).
+        pub fn exchange_code_for_session(&self, ctx: &Ctx,
+            /// The authorization code from the callback query string.
+            /// Typically obtained via `callback_code()`.
+            code: &str,
+        ) -> String {
             let Some(url) = super::request_url_from_ctx(ctx) else {
                 return String::new();
             };
@@ -939,6 +1131,15 @@ mod oidc {
             )
         }
 
+        /// Returns the original URL path the user was trying to access before
+        /// being redirected to log in. This is extracted from the encrypted state
+        /// cookie that was set during `authorization_url()`.
+        ///
+        /// Returns `"/"` if the state is invalid, expired, or the stored path
+        /// fails validation (e.g., contains a scheme/host or exceeds 2048 bytes).
+        ///
+        /// Use this as the `Location` header when redirecting the user after
+        /// successful authentication.
         pub fn callback_redirect_target(&self, ctx: &Ctx) -> String {
             let Some(url) = super::request_url_from_ctx(ctx) else {
                 return "/".to_string();
