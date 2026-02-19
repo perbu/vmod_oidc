@@ -1816,4 +1816,208 @@ mod tests {
         let key = decode_cookie_secret(&encoded).unwrap();
         assert_eq!(key, raw);
     }
+
+    #[test]
+    fn claims_size_limit_enforced() {
+        let (_server, provider) = setup_provider_server();
+
+        // Payload exceeding MAX_CLAIMS_BYTES should be rejected.
+        let big_claims = json!({
+            "sub": "123",
+            "exp": (now_secs() + 60) as i64,
+            "data": "x".repeat(4000)
+        });
+        let err = provider
+            .create_session_cookie_from_claims(&big_claims)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds 3072 bytes"),
+            "expected size limit error, got: {err}"
+        );
+
+        // Payload just under the limit should succeed.
+        // {"sub":"123","exp":9999999999,"data":"xx…"} — pad to stay under 3072.
+        let overhead = serde_json::to_vec(&json!({"sub":"123","exp":9999999999u64,"data":""}))
+            .unwrap()
+            .len();
+        let small_claims = json!({
+            "sub": "123",
+            "exp": (now_secs() + 60) as i64,
+            "data": "x".repeat(MAX_CLAIMS_BYTES - overhead - 10)
+        });
+        assert!(
+            provider
+                .create_session_cookie_from_claims(&small_claims)
+                .is_ok(),
+            "claims under limit should succeed"
+        );
+    }
+
+    #[test]
+    fn jwks_refresh_on_unknown_kid() {
+        let (mut server, provider, token_path) = setup_provider_server_with_fixture_jwks();
+
+        // Parse the fixture JWKS to extract the RSA modulus/exponent.
+        let fixture_jwks: Value = serde_json::from_str(FIXTURE_JWKS_JSON).unwrap();
+        let n = fixture_jwks["keys"][0]["n"].as_str().unwrap();
+        let e = fixture_jwks["keys"][0]["e"].as_str().unwrap();
+
+        // Set up a new JWKS mock that returns both the original key and a "rotated-key".
+        let rotated_jwks = json!({
+            "keys": [
+                {"kty":"RSA","alg":"RS256","kid":"test-key","n":n,"e":e,"use":"sig"},
+                {"kty":"RSA","alg":"RS256","kid":"rotated-key","n":n,"e":e,"use":"sig"}
+            ]
+        });
+        server
+            .mock("GET", "/jwks")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(rotated_jwks.to_string())
+            .create();
+
+        // Perform the full exchange flow with a token signed using kid "rotated-key".
+        // The first lookup will miss (cache only has "test-key"), triggering a JWKS
+        // refresh that picks up "rotated-key".
+        let start = provider
+            .authorization_url("/protected")
+            .expect("auth start should work");
+        let state = query_param(&start.url, "state").expect("state must exist");
+        let nonce = query_param(&start.url, "nonce").expect("nonce must exist");
+
+        let claims = json!({
+            "sub": "1234567890",
+            "email": "user@example.com",
+            "iss": server.url(),
+            "aud": "client-123",
+            "iat": now_secs() as i64,
+            "exp": (now_secs() + 300) as i64,
+            "nonce": nonce
+        });
+        let token = sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "rotated-key");
+
+        server
+            .mock("POST", token_path.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                "{{\"id_token\":\"{token}\",\"access_token\":\"abc\",\"token_type\":\"Bearer\"}}"
+            ))
+            .create();
+
+        let callback_url = format!("/oidc/callback?code=auth-code&state={state}");
+        let cookie_header = cookie_pair_from_set_cookie(&start.state_set_cookie);
+        let result =
+            provider.exchange_code_for_session("auth-code", &callback_url, Some(&cookie_header));
+
+        assert_ne!(result, "", "exchange should succeed after JWKS refresh");
+    }
+
+    #[test]
+    fn jwks_exponential_backoff() {
+        let (mut server, provider) = setup_provider_server();
+
+        // Replace the JWKS endpoint with one that returns 500.
+        server
+            .mock("GET", "/jwks")
+            .with_status(500)
+            .create();
+
+        // Force the cache to be expired so refresh is attempted.
+        {
+            let mut cache = provider.jwks_cache.lock().unwrap();
+            cache.expires_at = 0;
+        }
+
+        // First failure: refresh_failures goes from 0 to 1, backoff = 2^0 = 1s.
+        let _ = provider.refresh_jwks(true);
+        {
+            let cache = provider.jwks_cache.lock().unwrap();
+            assert_eq!(cache.refresh_failures, 1, "first failure should set count to 1");
+            // backoff_until should be roughly now + 1
+            let expected_backoff = 1u64; // 2^0
+            let drift = cache.backoff_until.saturating_sub(now_secs());
+            assert!(
+                drift <= expected_backoff + 1,
+                "first backoff should be ~1s, got drift {drift}"
+            );
+        }
+
+        // Reset backoff_until and expires_at so we can trigger another failure.
+        {
+            let mut cache = provider.jwks_cache.lock().unwrap();
+            cache.backoff_until = 0;
+            cache.expires_at = 0;
+        }
+
+        // Second failure: refresh_failures goes from 1 to 2, backoff = 2^1 = 2s.
+        let _ = provider.refresh_jwks(true);
+        {
+            let cache = provider.jwks_cache.lock().unwrap();
+            assert_eq!(cache.refresh_failures, 2, "second failure should set count to 2");
+            let expected_backoff = 2u64; // 2^1
+            let drift = cache.backoff_until.saturating_sub(now_secs());
+            assert!(
+                drift <= expected_backoff + 1,
+                "second backoff should be ~2s, got drift {drift}"
+            );
+        }
+
+        // Reset and trigger a third failure: backoff = 2^2 = 4s.
+        {
+            let mut cache = provider.jwks_cache.lock().unwrap();
+            cache.backoff_until = 0;
+            cache.expires_at = 0;
+        }
+
+        let _ = provider.refresh_jwks(true);
+        {
+            let cache = provider.jwks_cache.lock().unwrap();
+            assert_eq!(cache.refresh_failures, 3, "third failure should set count to 3");
+            let expected_backoff = 4u64; // 2^2
+            let drift = cache.backoff_until.saturating_sub(now_secs());
+            assert!(
+                drift <= expected_backoff + 1,
+                "third backoff should be ~4s, got drift {drift}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_max_age_extracts_correct_value() {
+        assert_eq!(parse_max_age("max-age=300"), Some(300));
+        assert_eq!(parse_max_age("public, max-age=120"), Some(120));
+        assert_eq!(parse_max_age("no-cache, no-store"), None);
+        assert_eq!(parse_max_age("max-age=0"), Some(0));
+        assert_eq!(parse_max_age(""), None);
+        assert_eq!(parse_max_age("max-age=abc"), None);
+        assert_eq!(parse_max_age("s-maxage=300"), None);
+    }
+
+    #[test]
+    fn non_object_cookie_payload_rejected() {
+        let (_server, provider) = setup_provider_server();
+
+        // Encrypt a JSON array — should be rejected by the as_object() check.
+        let array_value = provider
+            .cookie_cipher
+            .encrypt_json(&json!(["not", "an", "object"]))
+            .expect("encrypt should succeed");
+        let cookie_header = format!("{}={array_value}", provider.config.cookie_name);
+        assert!(
+            !provider.session_valid(Some(&cookie_header)),
+            "array payload should not be a valid session"
+        );
+
+        // Encrypt a plain string — also not an object.
+        let string_value = provider
+            .cookie_cipher
+            .encrypt_json(&json!("just a string"))
+            .expect("encrypt should succeed");
+        let cookie_header = format!("{}={string_value}", provider.config.cookie_name);
+        assert!(
+            !provider.session_valid(Some(&cookie_header)),
+            "string payload should not be a valid session"
+        );
+    }
 }
