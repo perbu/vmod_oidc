@@ -4,7 +4,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use reqwest::blocking::Client;
 use reqwest::header::CACHE_CONTROL;
 use serde::de::DeserializeOwned;
@@ -735,7 +735,7 @@ fn parse_max_age(cache_control: &str) -> Option<u64> {
 }
 
 fn random_token(len: usize) -> String {
-    rand::thread_rng()
+    rand::rng()
         .sample_iter(Alphanumeric)
         .take(len)
         .map(char::from)

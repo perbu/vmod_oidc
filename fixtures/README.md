@@ -22,7 +22,7 @@ Cookie fixtures in `fixtures/cookies/` are deterministic AES-GCM values generate
 - `expired-session.cookie`
 - `state-valid.cookie`
 - `state-invalid-return-to.cookie`
-- `state-expired.cookie`
+- `state-for-expired-token.cookie`
 - `state-wrong-audience.cookie`
 - `state-wrong-issuer.cookie`
 - `state-wrong-signature.cookie`
