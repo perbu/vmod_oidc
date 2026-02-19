@@ -32,7 +32,7 @@ struct Args {
 
 impl Args {
     fn from_env(mut args: impl Iterator<Item = String>) -> Result<Self, Box<dyn Error>> {
-        let mut output = PathBuf::from("fixtures");
+        let mut output = PathBuf::from("tests/fixtures");
         let mut issuer = String::from("http://localhost");
         let mut client_id = String::from("client-123");
 

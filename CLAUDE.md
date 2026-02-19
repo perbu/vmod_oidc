@@ -17,11 +17,11 @@ cargo test --features vmod     # Unit tests including VMOD-specific code
 
 ### Test Fixtures
 
-Fixtures (RSA keys, pre-signed JWTs, encrypted cookies) live in `fixtures/`. Regenerate with:
+Fixtures (RSA keys, pre-signed JWTs, encrypted cookies) live in `tests/fixtures/`. Regenerate with:
 
 ```sh
-cargo run -p gen-test-fixtures -- --output fixtures/
-cargo run -p gen-test-fixtures -- --output fixtures/ --issuer http://127.0.0.1:18080  # issuer-aligned tokens
+cargo run -p gen-test-fixtures -- --output tests/fixtures/
+cargo run -p gen-test-fixtures -- --output tests/fixtures/ --issuer http://127.0.0.1:18080  # issuer-aligned tokens
 ```
 
 ### VTC Integration Tests

@@ -2,7 +2,7 @@
 //!
 //! These tests are marked `#[ignore]` so `cargo test` skips them.
 //! Run via: `cargo test --test keycloak_integration -- --ignored --test-threads=1`
-//! Or use: `./integration/run.sh`
+//! Or use: `./tests/integration/run.sh`
 
 use std::time::Duration;
 use vmod_oidc::{Provider, ProviderConfig};

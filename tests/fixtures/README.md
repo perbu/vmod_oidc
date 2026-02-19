@@ -5,13 +5,13 @@ This directory contains generated keys, JWT fixtures, and encrypted cookie fixtu
 Regenerate with:
 
 ```sh
-cargo run -p gen-test-fixtures -- --output fixtures/
+cargo run -p gen-test-fixtures -- --output tests/fixtures/
 ```
 
 To generate issuer-aligned tokens for callback tests, pass an explicit issuer:
 
 ```sh
-cargo run -p gen-test-fixtures -- --output fixtures/ --issuer http://127.0.0.1:18080
+cargo run -p gen-test-fixtures -- --output tests/fixtures/ --issuer http://127.0.0.1:18080
 ```
 
 `v1` rule reminder: issuer validation is always enabled. Valid-path callback tests must use tokens whose `iss` claim matches discovery issuer at runtime.

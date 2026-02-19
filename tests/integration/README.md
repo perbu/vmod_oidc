@@ -11,7 +11,7 @@ Runs the OIDC library against a real Keycloak instance in Docker.
 ## Usage
 
 ```sh
-./integration/run.sh
+./tests/integration/run.sh
 ```
 
 This will:
@@ -26,13 +26,13 @@ If you want to iterate on tests without restarting Keycloak each time:
 
 ```sh
 # Start Keycloak (leave it running)
-docker compose -f integration/docker-compose.yml up -d
+docker compose -f tests/integration/docker-compose.yml up -d
 
 # Wait for it to be ready, then run tests as many times as needed
 cargo test --test keycloak_integration -- --ignored --test-threads=1
 
 # When done
-docker compose -f integration/docker-compose.yml down --volumes --remove-orphans
+docker compose -f tests/integration/docker-compose.yml down --volumes --remove-orphans
 ```
 
 ## Test realm configuration
@@ -48,7 +48,7 @@ docker compose -f integration/docker-compose.yml down --volumes --remove-orphans
 
 **Realm not found:** The realm import may have failed. Check logs:
 ```sh
-docker compose -f integration/docker-compose.yml logs keycloak
+docker compose -f tests/integration/docker-compose.yml logs keycloak
 ```
 
 **Tests hang:** Ensure Keycloak is healthy: `curl -s http://localhost:18080/health/ready`

@@ -503,10 +503,10 @@ mod tests {
 
     const TEST_SECRET_HEX: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const FIXTURE_RSA_PRIVATE_PEM: &str = include_str!("../fixtures/test-keys/rsa-private.pem");
+    const FIXTURE_RSA_PRIVATE_PEM: &str = include_str!("../tests/fixtures/test-keys/rsa-private.pem");
     const FIXTURE_WRONG_RSA_PRIVATE_PEM: &str =
-        include_str!("../fixtures/test-keys/wrong-key-private.pem");
-    const FIXTURE_JWKS_JSON: &str = include_str!("../fixtures/test-keys/jwks.json");
+        include_str!("../tests/fixtures/test-keys/wrong-key-private.pem");
+    const FIXTURE_JWKS_JSON: &str = include_str!("../tests/fixtures/test-keys/jwks.json");
 
     fn test_config(discovery_url: String) -> ProviderConfig {
         ProviderConfig {
