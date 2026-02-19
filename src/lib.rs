@@ -41,6 +41,8 @@ pub enum OidcError {
     Jwt(#[from] jsonwebtoken::errors::Error),
     #[error("invalid token: {0}")]
     InvalidToken(String),
+    #[error("internal error: {0}")]
+    Internal(String),
     #[error("invalid state")]
     InvalidState,
     #[error("crypto failure")]
@@ -369,7 +371,7 @@ impl Provider {
             let cache = self
                 .jwks_cache
                 .lock()
-                .map_err(|_| OidcError::InvalidToken("jwks mutex poisoned".to_string()))?;
+                .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
             now_secs() >= cache.expires_at
         };
 
@@ -387,7 +389,7 @@ impl Provider {
             let cache = self
                 .jwks_cache
                 .lock()
-                .map_err(|_| OidcError::InvalidToken("jwks mutex poisoned".to_string()))?;
+                .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
 
             if now < cache.backoff_until {
                 return Err(OidcError::InvalidToken(
@@ -407,7 +409,7 @@ impl Provider {
                 let mut cache = self
                     .jwks_cache
                     .lock()
-                    .map_err(|_| OidcError::InvalidToken("jwks mutex poisoned".to_string()))?;
+                    .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
                 // Only update if no other thread refreshed while we were fetching.
                 if cache.expires_at == prev_expires_at {
                     *cache = new_cache;
@@ -418,12 +420,12 @@ impl Provider {
                 let mut cache = self
                     .jwks_cache
                     .lock()
-                    .map_err(|_| OidcError::InvalidToken("jwks mutex poisoned".to_string()))?;
+                    .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
                 // Only set backoff if no other thread refreshed successfully.
                 if cache.expires_at == prev_expires_at {
-                    cache.refresh_failures = cache.refresh_failures.saturating_add(1);
                     let exponent = cmp::min(cache.refresh_failures, 6);
                     let backoff = 1u64 << exponent;
+                    cache.refresh_failures = cache.refresh_failures.saturating_add(1);
                     cache.backoff_until = now_secs() + cmp::min(backoff, 60);
                 }
                 Err(err)
@@ -453,7 +455,7 @@ impl Provider {
         let cache = self
             .jwks_cache
             .lock()
-            .map_err(|_| OidcError::InvalidToken("jwks mutex poisoned".to_string()))?;
+            .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
 
         Ok(cache.lookup(kid))
     }
