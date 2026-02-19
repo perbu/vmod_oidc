@@ -7,8 +7,13 @@
 #   2. Set "Authorized redirect URIs" to https://www.example.com/oidc/callback
 #   3. Generate a 32-byte cookie secret:
 #        openssl rand -hex 32
+#   4. Set environment variables before starting Varnish:
+#        export OIDC_CLIENT_ID="123456789.apps.googleusercontent.com"
+#        export OIDC_CLIENT_SECRET="GOCSPX-your-client-secret-here"
+#        export OIDC_JWT_SECRET="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 import oidc;
+import std;
 
 backend default {
     .host = "127.0.0.1";
@@ -18,10 +23,10 @@ backend default {
 sub vcl_init {
     new google = oidc.provider(
         discovery_url = "https://accounts.google.com/.well-known/openid-configuration",
-        client_id     = "123456789.apps.googleusercontent.com",
-        client_secret = "GOCSPX-your-client-secret-here",
+        client_id     = std.getenv("OIDC_CLIENT_ID"),
+        client_secret = std.getenv("OIDC_CLIENT_SECRET"),
         redirect_uri  = "https://www.example.com/oidc/callback",
-        cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        cookie_secret = std.getenv("OIDC_JWT_SECRET"),
         cookie_name   = "__oidc_session",
         cookie_ttl    = 3600s,
         scopes        = "openid email profile"
