@@ -1,0 +1,19 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    command:
+      - start-dev
+      - --import-realm
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./keycloak/test-realm.json:/opt/keycloak/data/import/test-realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s

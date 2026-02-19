@@ -333,7 +333,7 @@ fn write_cookie_fixtures(
         )?,
     )?;
     fs::write(
-        cookie_dir.join("state-expired.cookie"),
+        cookie_dir.join("state-for-expired-token.cookie"),
         encrypt_cookie_json(
             &key,
             &[2, 4, 6, 8, 10, 0, 1, 3, 5, 7, 9, 11],

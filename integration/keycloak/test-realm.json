@@ -1,0 +1,42 @@
+{
+  "realm": "test-realm",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "bruteForceProtected": false,
+  "clients": [
+    {
+      "clientId": "test-client",
+      "name": "Test Client",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "test-client-secret",
+      "redirectUris": ["http://localhost:19090/oidc/callback"],
+      "webOrigins": ["*"],
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "fullScopeAllowed": true,
+      "protocol": "openid-connect"
+    }
+  ],
+  "users": [
+    {
+      "username": "testuser",
+      "email": "testuser@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Test",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "testpassword",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
