@@ -94,7 +94,11 @@ impl ProviderConfig {
             self.cookie_name = DEFAULT_COOKIE_NAME.to_string();
         }
         if self.state_cookie_name.trim().is_empty() {
-            self.state_cookie_name = DEFAULT_STATE_COOKIE_NAME.to_string();
+            self.state_cookie_name = if self.cookie_name == DEFAULT_COOKIE_NAME {
+                DEFAULT_STATE_COOKIE_NAME.to_string()
+            } else {
+                format!("{}_state", self.cookie_name)
+            };
         }
         if self.scopes.trim().is_empty() {
             self.scopes = DEFAULT_SCOPES.to_string();
@@ -824,6 +828,154 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
         .as_secs()
+}
+
+#[cfg(feature = "vmod")]
+#[allow(non_camel_case_types)]
+pub struct provider {
+    inner: Provider,
+}
+
+#[cfg(feature = "vmod")]
+#[varnish::vmod]
+mod oidc {
+    use super::{Provider, ProviderConfig, provider};
+    use std::time::Duration;
+    use varnish::vcl::Ctx;
+
+    impl provider {
+        #[expect(clippy::too_many_arguments)]
+        pub fn new(
+            discovery_url: &str,
+            client_id: &str,
+            client_secret: &str,
+            redirect_uri: &str,
+            cookie_secret: &str,
+            cookie_name: Option<&str>,
+            cookie_ttl: Option<Duration>,
+            state_cookie_ttl: Option<Duration>,
+            cookie_secure: Option<bool>,
+            scopes: Option<&str>,
+        ) -> Result<Self, String> {
+            let config = ProviderConfig {
+                discovery_url: discovery_url.to_string(),
+                client_id: client_id.to_string(),
+                client_secret: client_secret.to_string(),
+                redirect_uri: redirect_uri.to_string(),
+                cookie_secret: cookie_secret.to_string(),
+                cookie_name: cookie_name.unwrap_or_default().to_string(),
+                state_cookie_name: String::new(),
+                cookie_ttl_secs: cookie_ttl.map(|v| v.as_secs()).unwrap_or(0),
+                state_cookie_ttl_secs: state_cookie_ttl.map(|v| v.as_secs()).unwrap_or(0),
+                cookie_secure: cookie_secure.unwrap_or(true),
+                scopes: scopes.unwrap_or_default().to_string(),
+            };
+
+            Provider::new(config)
+                .map(|inner| Self { inner })
+                .map_err(|err| err.to_string())
+        }
+
+        pub fn session_valid(&self, ctx: &Ctx) -> bool {
+            self.inner
+                .session_valid(super::cookie_header_from_ctx(ctx).as_deref())
+        }
+
+        pub fn claim(&self, ctx: &Ctx, name: &str) -> String {
+            self.inner
+                .claim(super::cookie_header_from_ctx(ctx).as_deref(), name)
+        }
+
+        pub fn authorization_url(&self, ctx: &mut Ctx) -> String {
+            let req_url = super::request_url_from_ctx(ctx).unwrap_or_else(|| "/".to_string());
+            let start = match self.inner.authorization_url(&req_url) {
+                Ok(start) => start,
+                Err(_) => return String::new(),
+            };
+
+            if !super::set_response_cookie_on_ctx(ctx, &start.state_set_cookie) {
+                return String::new();
+            }
+
+            start.url
+        }
+
+        pub fn callback_code(&self, ctx: &Ctx) -> String {
+            super::request_url_from_ctx(ctx)
+                .map(|url| self.inner.callback_code(&url))
+                .unwrap_or_default()
+        }
+
+        pub fn callback_state(&self, ctx: &Ctx) -> String {
+            super::request_url_from_ctx(ctx)
+                .map(|url| self.inner.callback_state(&url))
+                .unwrap_or_default()
+        }
+
+        pub fn callback_state_valid(&self, ctx: &Ctx) -> bool {
+            let Some(url) = super::request_url_from_ctx(ctx) else {
+                return false;
+            };
+            self.inner
+                .callback_state_valid(&url, super::cookie_header_from_ctx(ctx).as_deref())
+        }
+
+        pub fn exchange_code_for_session(&self, ctx: &Ctx, code: &str) -> String {
+            let Some(url) = super::request_url_from_ctx(ctx) else {
+                return String::new();
+            };
+            self.inner.exchange_code_for_session(
+                code,
+                &url,
+                super::cookie_header_from_ctx(ctx).as_deref(),
+            )
+        }
+
+        pub fn callback_redirect_target(&self, ctx: &Ctx) -> String {
+            let Some(url) = super::request_url_from_ctx(ctx) else {
+                return "/".to_string();
+            };
+            self.inner
+                .callback_redirect_target(&url, super::cookie_header_from_ctx(ctx).as_deref())
+        }
+    }
+}
+
+#[cfg(feature = "vmod")]
+fn request_url_from_ctx(ctx: &varnish::vcl::Ctx) -> Option<String> {
+    [
+        ctx.http_req.as_ref(),
+        ctx.http_req_top.as_ref(),
+        ctx.http_bereq.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|headers| headers.url().map(str_or_bytes_to_string))
+}
+
+#[cfg(feature = "vmod")]
+fn cookie_header_from_ctx(ctx: &varnish::vcl::Ctx) -> Option<String> {
+    [
+        ctx.http_req.as_ref(),
+        ctx.http_req_top.as_ref(),
+        ctx.http_bereq.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|headers| headers.header("Cookie").map(str_or_bytes_to_string))
+}
+
+#[cfg(feature = "vmod")]
+fn set_response_cookie_on_ctx(ctx: &mut varnish::vcl::Ctx, value: &str) -> bool {
+    let Some(resp) = ctx.http_resp.as_mut() else {
+        return false;
+    };
+    resp.set_header("Set-Cookie", value).is_ok()
+}
+
+#[cfg(feature = "vmod")]
+fn str_or_bytes_to_string(input: varnish::vcl::StrOrBytes<'_>) -> String {
+    String::from_utf8_lossy(input.as_ref()).into_owned()
 }
 
 #[cfg(test)]
