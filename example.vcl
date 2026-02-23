@@ -35,28 +35,20 @@ sub vcl_init {
 
 sub vcl_recv {
     # --- OIDC callback ---
-    # This path handles the redirect back from Google after the user logs in.
+    # The built-in backend handles state validation, code exchange,
+    # and redirects the user back with a session cookie.
     if (req.url ~ "^/oidc/callback") {
-        if (!google.callback_state_valid()) {
-            return (synth(403, "Invalid state"));
-        }
-
-        set req.http.X-Set-Cookie = google.exchange_code_for_session(
-            google.callback_code()
-        );
-
-        if (req.http.X-Set-Cookie == "") {
-            return (synth(403, "Authentication failed"));
-        }
-
-        return (synth(302, "Authenticated"));
+        set req.backend_hint = google.backend();
+        return (pass);
     }
 
     # --- Protected paths ---
     # Everything under /app/ requires a valid session.
+    # Unauthenticated users are redirected to Google by the built-in backend.
     if (req.url ~ "^/app/") {
         if (!google.session_valid()) {
-            return (synth(302, "Login required"));
+            set req.backend_hint = google.backend();
+            return (pass);
         }
 
         # Pass user identity to the backend as headers.
@@ -66,30 +58,4 @@ sub vcl_recv {
     }
 
     # Everything else (/, /static/, /health, etc.) is public.
-}
-
-sub vcl_synth {
-    # Redirect to Google login
-    if (resp.status == 302 && resp.reason == "Login required") {
-        set resp.http.Location = google.authorization_url();
-        return (deliver);
-    }
-
-    # Post-login redirect: set the session cookie and send the user
-    # back to the page they originally requested.
-    if (resp.status == 302 && resp.reason == "Authenticated") {
-        set resp.http.Set-Cookie = req.http.X-Set-Cookie;
-        set resp.http.Location = google.callback_redirect_target();
-        return (deliver);
-    }
-}
-
-sub vcl_backend_response {
-    # Cache public assets normally. Authenticated pages should not be cached
-    # (the backend should send appropriate Cache-Control headers, or you can
-    # force it here).
-    if (bereq.url ~ "^/app/") {
-        set beresp.uncacheable = true;
-        set beresp.ttl = 0s;
-    }
 }

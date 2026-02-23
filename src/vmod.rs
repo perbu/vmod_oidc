@@ -1,4 +1,64 @@
-use crate::Provider;
+use crate::{OidcBackendResponse, Provider};
+use std::sync::Arc;
+
+/// The Varnish backend implementation that handles OIDC requests directly.
+struct OidcBackend {
+    inner: Arc<Provider>,
+}
+
+impl varnish::vcl::VclBackend<()> for OidcBackend {
+    fn get_response(
+        &self,
+        ctx: &mut varnish::vcl::Ctx,
+    ) -> Result<Option<()>, varnish::vcl::VclError> {
+        let url = ctx
+            .http_bereq
+            .as_ref()
+            .and_then(|h| h.url())
+            .and_then(sob_to_string)
+            .unwrap_or_default();
+
+        let cookie = ctx
+            .http_bereq
+            .as_ref()
+            .and_then(|h| h.header("Cookie"))
+            .and_then(sob_to_string);
+
+        let response = self.inner.handle_backend_request(&url, cookie.as_deref());
+
+        let beresp = ctx
+            .http_beresp
+            .as_mut()
+            .ok_or_else(|| varnish::vcl::VclError::new("no beresp available".to_string()))?;
+
+        match response {
+            OidcBackendResponse::LoginRedirect {
+                location,
+                state_set_cookie,
+            } => {
+                beresp.set_status(302);
+                beresp.set_header("Location", &location)?;
+                beresp.set_header("Set-Cookie", &state_set_cookie)?;
+                beresp.set_header("Cache-Control", "no-store")?;
+            }
+            OidcBackendResponse::CallbackSuccess {
+                location,
+                session_set_cookie,
+            } => {
+                beresp.set_status(302);
+                beresp.set_header("Location", &location)?;
+                beresp.set_header("Set-Cookie", &session_set_cookie)?;
+                beresp.set_header("Cache-Control", "no-store")?;
+            }
+            OidcBackendResponse::Error { status } => {
+                beresp.set_status(status);
+                beresp.set_header("Cache-Control", "no-store")?;
+            }
+        }
+
+        Ok(Some(()))
+    }
+}
 
 /// An OIDC provider instance that handles authentication against a single
 /// OpenID Connect identity provider.
@@ -13,7 +73,8 @@ use crate::Provider;
 /// its own cookie name and configuration.
 #[allow(non_camel_case_types)]
 pub struct provider {
-    inner: Provider,
+    inner: Arc<Provider>,
+    backend: varnish::vcl::Backend<OidcBackend, ()>,
 }
 
 /// OpenID Connect authentication for Varnish Cache.
@@ -25,16 +86,21 @@ pub struct provider {
 ///
 /// # How it works
 ///
-/// The VMOD implements the standard OIDC Authorization Code flow:
+/// The VMOD implements the standard OIDC Authorization Code flow using a
+/// built-in Varnish backend that generates redirect and error responses
+/// directly — no `vcl_synth` state machine is needed:
 ///
 /// 1. An unauthenticated request arrives at a protected path.
 /// 2. VCL calls `session_valid()` which returns `FALSE` (no valid cookie).
-/// 3. VCL calls `authorization_url()` and redirects the user to the identity provider.
-/// 4. The user authenticates with the provider and is redirected back with an authorization code.
-/// 5. VCL calls `exchange_code_for_session(code)` which exchanges the code for an ID token,
-///    validates it, and returns a `Set-Cookie` header containing the encrypted session.
-/// 6. Subsequent requests include the session cookie; `session_valid()` returns `TRUE` and
-///    individual claims (email, name, etc.) are available via `claim()`.
+/// 3. VCL sets `req.backend_hint = provider.backend()` and returns `pass`.
+/// 4. The built-in backend generates a 302 redirect to the identity provider,
+///    setting the state cookie automatically.
+/// 5. The user authenticates and is redirected back to the callback path.
+/// 6. VCL routes the callback to the same backend, which exchanges the code
+///    for an ID token, validates it, and returns a 302 redirect with the
+///    encrypted session cookie.
+/// 7. Subsequent requests include the session cookie; `session_valid()` returns
+///    `TRUE` and individual claims are available via `claim()`.
 ///
 /// # Session model
 ///
@@ -59,59 +125,47 @@ pub struct provider {
 ///
 /// ```vcl
 /// import oidc;
+/// import std;
+///
+/// backend default {
+///     .host = "127.0.0.1";
+///     .port = "8080";
+/// }
 ///
 /// sub vcl_init {
 ///     new google = oidc.provider(
 ///         discovery_url = "https://accounts.google.com/.well-known/openid-configuration",
-///         client_id     = "your-client-id.apps.googleusercontent.com",
-///         client_secret = "your-client-secret",
-///         redirect_uri  = "https://example.com/oidc/callback",
-///         cookie_secret = "hex-or-base64-encoded-32-byte-key"
+///         client_id     = std.getenv("OIDC_CLIENT_ID"),
+///         client_secret = std.getenv("OIDC_CLIENT_SECRET"),
+///         redirect_uri  = "https://www.example.com/oidc/callback",
+///         cookie_secret = std.getenv("OIDC_JWT_SECRET"),
+///         scopes        = "openid email profile"
 ///     );
 /// }
 ///
 /// sub vcl_recv {
-///     // Handle the OIDC callback
 ///     if (req.url ~ "^/oidc/callback") {
-///         if (!google.callback_state_valid()) {
-///             return (synth(403, "Invalid state"));
-///         }
-///         set req.http.X-Set-Cookie = google.exchange_code_for_session(
-///             google.callback_code()
-///         );
-///         if (req.http.X-Set-Cookie == "") {
-///             return (synth(403, "Authentication failed"));
-///         }
-///         return (synth(302, "Authenticated"));
+///         set req.backend_hint = google.backend();
+///         return (pass);
 ///     }
-///
-///     // Protect specific paths
-///     if (req.url ~ "^/protected/") {
+///     if (req.url ~ "^/app/") {
 ///         if (!google.session_valid()) {
-///             return (synth(302, "Login required"));
+///             set req.backend_hint = google.backend();
+///             return (pass);
 ///         }
 ///         set req.http.X-User-Email = google.claim("email");
 ///     }
 /// }
-///
-/// sub vcl_synth {
-///     if (resp.status == 302 && resp.reason == "Login required") {
-///         set resp.http.Location = google.authorization_url();
-///         return (deliver);
-///     }
-///     if (resp.status == 302 && resp.reason == "Authenticated") {
-///         set resp.http.Set-Cookie = req.http.X-Set-Cookie;
-///         set resp.http.Location = google.callback_redirect_target();
-///         return (deliver);
-///     }
-/// }
+/// // No vcl_synth needed!
 /// ```
 #[varnish::vmod(docs = "README.md")]
 mod oidc {
-    use super::provider;
+    use super::{OidcBackend, provider};
     use crate::{Provider, ProviderConfig};
+    use std::sync::Arc;
     use std::time::Duration;
-    use varnish::vcl::Ctx;
+    use varnish::ffi::VCL_BACKEND;
+    use varnish::vcl::{Backend, Ctx};
 
     impl provider {
         /// Create a new OIDC provider by fetching and validating the discovery document
@@ -125,6 +179,8 @@ mod oidc {
         /// `openssl rand -hex 32`
         #[expect(clippy::too_many_arguments)]
         pub fn new(
+            ctx: &mut Ctx,
+            #[vcl_name] vcl_name: &str,
             /// The OIDC discovery endpoint URL, typically ending in
             /// `/.well-known/openid-configuration`.
             discovery_url: &str,
@@ -165,9 +221,29 @@ mod oidc {
                 scopes: scopes.unwrap_or_default().to_string(),
             };
 
-            Provider::new(config)
-                .map(|inner| Self { inner })
-                .map_err(|err| err.to_string())
+            let inner = Arc::new(Provider::new(config).map_err(|e| e.to_string())?);
+            let oidc_backend = OidcBackend {
+                inner: inner.clone(),
+            };
+            let backend = Backend::new(ctx, "oidc", vcl_name, oidc_backend, false)
+                .map_err(|e| e.to_string())?;
+
+            Ok(Self { inner, backend })
+        }
+
+        /// Returns the built-in OIDC backend that generates redirect and error
+        /// responses directly. Use this as `req.backend_hint` in `vcl_recv` for:
+        ///
+        /// - **Callback requests** (`/oidc/callback`): validates the state cookie,
+        ///   exchanges the authorization code for a session, and redirects the user
+        ///   back to the original URL with a `Set-Cookie` header.
+        /// - **Login redirects**: generates a 302 redirect to the identity provider's
+        ///   authorization endpoint with the appropriate state cookie.
+        ///
+        /// The backend determines whether a request is a callback or a login redirect
+        /// by comparing the request path against the configured `redirect_uri` path.
+        pub unsafe fn backend(&self) -> VCL_BACKEND {
+            self.backend.vcl_ptr()
         }
 
         /// Returns `TRUE` if the request carries a valid, non-expired session cookie.
@@ -189,7 +265,9 @@ mod oidc {
         /// set req.http.X-User-Email = google.claim("email");
         /// set req.http.X-User-Sub   = google.claim("sub");
         /// ```
-        pub fn claim(&self, ctx: &Ctx,
+        pub fn claim(
+            &self,
+            ctx: &Ctx,
             /// The claim name to look up (e.g., `"email"`, `"sub"`, `"name"`).
             name: &str,
         ) -> String {
@@ -269,13 +347,17 @@ mod oidc {
         ///
         /// The returned string is a complete `Set-Cookie` header value that should
         /// be set on the response (e.g., `set resp.http.Set-Cookie = ...`).
-        pub fn exchange_code_for_session(&self, ctx: &Ctx,
+        pub fn exchange_code_for_session(
+            &self,
+            ctx: &Ctx,
             /// The authorization code from the callback query string.
             /// Typically obtained via `callback_code()`.
             code: &str,
         ) -> String {
             super::with_request_url(ctx, |url| {
-                let Some(url) = url else { return String::new() };
+                let Some(url) = url else {
+                    return String::new();
+                };
                 super::with_cookie_header(ctx, |cookie| {
                     self.inner.exchange_code_for_session(code, url, cookie)
                 })
@@ -301,6 +383,13 @@ mod oidc {
                 })
             })
         }
+    }
+}
+
+fn sob_to_string(sob: varnish::vcl::StrOrBytes<'_>) -> Option<String> {
+    match sob {
+        varnish::vcl::StrOrBytes::Utf8(s) => Some(s.to_string()),
+        varnish::vcl::StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
     }
 }
 

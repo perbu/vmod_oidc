@@ -17,16 +17,21 @@ cached content.
 
 ## How it works
 
-The VMOD implements the standard OIDC Authorization Code flow:
+The VMOD implements the standard OIDC Authorization Code flow using a
+built-in Varnish backend that generates redirect and error responses
+directly — no `vcl_synth` state machine is needed:
 
 1. An unauthenticated request arrives at a protected path.
 2. VCL calls `session_valid()` which returns `FALSE` (no valid cookie).
-3. VCL calls `authorization_url()` and redirects the user to the identity provider.
-4. The user authenticates with the provider and is redirected back with an authorization code.
-5. VCL calls `exchange_code_for_session(code)` which exchanges the code for an ID token,
-validates it, and returns a `Set-Cookie` header containing the encrypted session.
-6. Subsequent requests include the session cookie; `session_valid()` returns `TRUE` and
-individual claims (email, name, etc.) are available via `claim()`.
+3. VCL sets `req.backend_hint = provider.backend()` and returns `pass`.
+4. The built-in backend generates a 302 redirect to the identity provider,
+setting the state cookie automatically.
+5. The user authenticates and is redirected back to the callback path.
+6. VCL routes the callback to the same backend, which exchanges the code
+for an ID token, validates it, and returns a 302 redirect with the
+encrypted session cookie.
+7. Subsequent requests include the session cookie; `session_valid()` returns
+`TRUE` and individual claims are available via `claim()`.
 
 ## Session model
 
@@ -51,52 +56,38 @@ and `Secure` by default. Contents are encrypted and authenticated with AES-256-G
 
 ```vcl
 import oidc;
+import std;
+
+backend default {
+.host = "127.0.0.1";
+.port = "8080";
+}
 
 sub vcl_init {
 new google = oidc.provider(
 discovery_url = "https://accounts.google.com/.well-known/openid-configuration",
-client_id     = "your-client-id.apps.googleusercontent.com",
-client_secret = "your-client-secret",
-redirect_uri  = "https://example.com/oidc/callback",
-cookie_secret = "hex-or-base64-encoded-32-byte-key"
+client_id     = std.getenv("OIDC_CLIENT_ID"),
+client_secret = std.getenv("OIDC_CLIENT_SECRET"),
+redirect_uri  = "https://www.example.com/oidc/callback",
+cookie_secret = std.getenv("OIDC_JWT_SECRET"),
+scopes        = "openid email profile"
 );
 }
 
 sub vcl_recv {
-// Handle the OIDC callback
 if (req.url ~ "^/oidc/callback") {
-if (!google.callback_state_valid()) {
-return (synth(403, "Invalid state"));
+set req.backend_hint = google.backend();
+return (pass);
 }
-set req.http.X-Set-Cookie = google.exchange_code_for_session(
-google.callback_code()
-);
-if (req.http.X-Set-Cookie == "") {
-return (synth(403, "Authentication failed"));
-}
-return (synth(302, "Authenticated"));
-}
-
-// Protect specific paths
-if (req.url ~ "^/protected/") {
+if (req.url ~ "^/app/") {
 if (!google.session_valid()) {
-return (synth(302, "Login required"));
+set req.backend_hint = google.backend();
+return (pass);
 }
 set req.http.X-User-Email = google.claim("email");
 }
 }
-
-sub vcl_synth {
-if (resp.status == 302 && resp.reason == "Login required") {
-set resp.http.Location = google.authorization_url();
-return (deliver);
-}
-if (resp.status == 302 && resp.reason == "Authenticated") {
-set resp.http.Set-Cookie = req.http.X-Set-Cookie;
-set resp.http.Location = google.callback_redirect_target();
-return (deliver);
-}
-}
+// No vcl_synth needed!
 ```
 
 ```vcl
@@ -145,6 +136,20 @@ Set to `false` only for local development over plain HTTP.
 * `[STRING scopes]`:
 Space-separated list of OAuth scopes to request. Defaults to `"openid"`.
 Common additions: `"openid email profile"`.
+
+#### Method `BACKEND <object>.backend()`
+
+Returns the built-in OIDC backend that generates redirect and error
+responses directly. Use this as `req.backend_hint` in `vcl_recv` for:
+
+- **Callback requests** (`/oidc/callback`): validates the state cookie,
+exchanges the authorization code for a session, and redirects the user
+back to the original URL with a `Set-Cookie` header.
+- **Login redirects**: generates a 302 redirect to the identity provider's
+authorization endpoint with the appropriate state cookie.
+
+The backend determines whether a request is a callback or a login redirect
+by comparing the request path against the configured `redirect_uri` path.
 
 #### Method `BOOL <object>.session_valid()`
 
