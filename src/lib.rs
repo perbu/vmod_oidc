@@ -395,6 +395,7 @@ impl Provider {
             "iat".to_string(),
             "aud".to_string(),
             "iss".to_string(),
+            "sub".to_string(),
         ]);
 
         let token_data = decode::<Value>(id_token, &key, &validation)?;
@@ -422,10 +423,7 @@ impl Provider {
 
     fn refresh_jwks_if_expired(&self) -> Result<(), OidcError> {
         let expired = {
-            let cache = self
-                .jwks_cache
-                .lock()
-                .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
+            let cache = self.jwks_cache.lock().unwrap_or_else(|e| e.into_inner());
             now_secs() >= cache.expires_at
         };
 
@@ -440,10 +438,7 @@ impl Provider {
         let now = now_secs();
         let prev_expires_at;
         {
-            let cache = self
-                .jwks_cache
-                .lock()
-                .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
+            let cache = self.jwks_cache.lock().unwrap_or_else(|e| e.into_inner());
 
             if now < cache.backoff_until {
                 return Err(OidcError::InvalidToken(
@@ -460,10 +455,7 @@ impl Provider {
 
         match fetch_jwks_cache(&self.client, &self.discovery.jwks_uri) {
             Ok(new_cache) => {
-                let mut cache = self
-                    .jwks_cache
-                    .lock()
-                    .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
+                let mut cache = self.jwks_cache.lock().unwrap_or_else(|e| e.into_inner());
                 // Only update if no other thread refreshed while we were fetching.
                 if cache.expires_at == prev_expires_at {
                     *cache = new_cache;
@@ -471,10 +463,7 @@ impl Provider {
                 Ok(())
             }
             Err(err) => {
-                let mut cache = self
-                    .jwks_cache
-                    .lock()
-                    .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
+                let mut cache = self.jwks_cache.lock().unwrap_or_else(|e| e.into_inner());
                 // Only set backoff if no other thread refreshed successfully.
                 if cache.expires_at == prev_expires_at {
                     let exponent = cmp::min(cache.refresh_failures, 6);
@@ -506,11 +495,7 @@ impl Provider {
     }
 
     fn lookup_key(&self, kid: Option<&str>) -> Result<Option<RsaKeyMaterial>, OidcError> {
-        let cache = self
-            .jwks_cache
-            .lock()
-            .map_err(|_| OidcError::Internal("jwks mutex poisoned".to_string()))?;
-
+        let cache = self.jwks_cache.lock().unwrap_or_else(|e| e.into_inner());
         Ok(cache.lookup(kid))
     }
 
