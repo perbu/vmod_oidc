@@ -1,5 +1,8 @@
 use crate::{OidcBackendResponse, Provider};
+use serde_json::{Map, Value};
 use std::sync::Arc;
+
+pub(crate) struct CachedClaims(Map<String, Value>);
 
 /// The Varnish backend implementation that handles OIDC requests directly.
 struct OidcBackend {
@@ -160,7 +163,7 @@ pub struct provider {
 /// ```
 #[varnish::vmod(docs = "README.md")]
 mod oidc {
-    use super::{OidcBackend, provider};
+    use super::{CachedClaims, OidcBackend, provider};
     use crate::{Provider, ProviderConfig};
     use std::sync::Arc;
     use std::time::Duration;
@@ -251,8 +254,28 @@ mod oidc {
         /// Use this in `vcl_recv` to decide whether a request is authenticated.
         /// Returns `FALSE` if the cookie is missing, expired, tampered with, or
         /// encrypted with a different key.
-        pub fn session_valid(&self, ctx: &Ctx) -> bool {
-            super::with_cookie_header(ctx, |cookie| self.inner.session_valid(cookie))
+        ///
+        /// The decrypted claims are cached for the lifetime of the request, so
+        /// subsequent calls to `session_valid()` and `claim()` avoid redundant
+        /// decryption.
+        pub fn session_valid(
+            &self,
+            ctx: &Ctx,
+            #[shared_per_task] cache: &mut Option<Box<CachedClaims>>,
+        ) -> bool {
+            if cache.is_some() {
+                return true;
+            }
+            let result = super::with_cookie_header(ctx, |cookie| {
+                self.inner.load_session_claims(cookie)
+            });
+            match result {
+                Ok(claims) => {
+                    *cache = Some(Box::new(CachedClaims(claims)));
+                    true
+                }
+                Err(_) => false,
+            }
         }
 
         /// Returns the value of a named claim from the session cookie.
@@ -261,6 +284,9 @@ mod oidc {
         /// object claims are returned as compact JSON. Returns an empty string
         /// if the session is invalid or the claim does not exist.
         ///
+        /// The decrypted claims are cached for the lifetime of the request, so
+        /// calling `claim()` multiple times only decrypts the cookie once.
+        ///
         /// ```vcl
         /// set req.http.X-User-Email = google.claim("email");
         /// set req.http.X-User-Sub   = google.claim("sub");
@@ -268,10 +294,26 @@ mod oidc {
         pub fn claim(
             &self,
             ctx: &Ctx,
+            #[shared_per_task] cache: &mut Option<Box<CachedClaims>>,
             /// The claim name to look up (e.g., `"email"`, `"sub"`, `"name"`).
             name: &str,
         ) -> String {
-            super::with_cookie_header(ctx, |cookie| self.inner.claim(cookie, name))
+            let claims = match cache.as_ref() {
+                Some(c) => &c.0,
+                None => {
+                    let result = super::with_cookie_header(ctx, |cookie| {
+                        self.inner.load_session_claims(cookie)
+                    });
+                    match result {
+                        Ok(claims) => {
+                            *cache = Some(Box::new(CachedClaims(claims)));
+                            &cache.as_ref().unwrap().0
+                        }
+                        Err(_) => return String::new(),
+                    }
+                }
+            };
+            crate::format_claim_value(claims, name)
         }
 
         /// Returns the full authorization URL to redirect the user to the identity

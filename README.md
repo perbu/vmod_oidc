@@ -159,6 +159,10 @@ Use this in `vcl_recv` to decide whether a request is authenticated.
 Returns `FALSE` if the cookie is missing, expired, tampered with, or
 encrypted with a different key.
 
+The decrypted claims are cached for the lifetime of the request, so
+subsequent calls to `session_valid()` and `claim()` avoid redundant
+decryption.
+
 #### Method `STRING <object>.claim(STRING name)`
 
 Returns the value of a named claim from the session cookie.
@@ -166,6 +170,9 @@ Returns the value of a named claim from the session cookie.
 String and numeric claims are returned as plain strings. Array and
 object claims are returned as compact JSON. Returns an empty string
 if the session is invalid or the claim does not exist.
+
+The decrypted claims are cached for the lifetime of the request, so
+calling `claim()` multiple times only decrypts the cookie once.
 
 ```vcl
 set req.http.X-User-Email = google.claim("email");

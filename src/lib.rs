@@ -149,6 +149,17 @@ pub struct Provider {
     redirect_uri_path: String,
 }
 
+pub(crate) fn format_claim_value(claims: &Map<String, Value>, name: &str) -> String {
+    match claims.get(name) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(v)) => v.to_string(),
+        Some(Value::Array(v)) => serde_json::to_string(v).unwrap_or_default(),
+        Some(Value::Object(v)) => serde_json::to_string(v).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 impl Provider {
     pub fn new(config: ProviderConfig) -> Result<Self, OidcError> {
         let config = config.normalize()?;
@@ -301,14 +312,7 @@ impl Provider {
 
     pub fn claim(&self, cookie_header: Option<&str>, name: &str) -> String {
         match self.load_session_claims(cookie_header) {
-            Ok(claims) => match claims.get(name) {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Number(n)) => n.to_string(),
-                Some(Value::Bool(v)) => v.to_string(),
-                Some(Value::Array(v)) => serde_json::to_string(v).unwrap_or_default(),
-                Some(Value::Object(v)) => serde_json::to_string(v).unwrap_or_default(),
-                _ => String::new(),
-            },
+            Ok(claims) => format_claim_value(&claims, name),
             Err(_) => String::new(),
         }
     }
@@ -524,7 +528,7 @@ impl Provider {
         Ok(state)
     }
 
-    fn load_session_claims(
+    pub(crate) fn load_session_claims(
         &self,
         cookie_header: Option<&str>,
     ) -> Result<Map<String, Value>, OidcError> {
