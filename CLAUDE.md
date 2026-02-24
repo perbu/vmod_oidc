@@ -71,6 +71,17 @@ Stateless, cookie-based. Session data is AES-256-GCM encrypted and stored direct
 - `vmod` — Enables `varnish-rs` VMOD FFI bindings
 - `vtc-tests` — Implies `vmod`, enables VTC test support
 
+## Versioning
+
+Versions follow semver and are tracked in `Cargo.toml`. When bumping the version:
+
+1. Bump `version` in `Cargo.toml` as part of the feature/fix commit.
+2. After pushing, create a git tag on that exact commit: `git tag vX.Y.Z <commit>` and push it: `git push origin vX.Y.Z`.
+3. The tag must match the `Cargo.toml` version (e.g. version `0.1.2` → tag `v0.1.2`).
+4. The GitHub Release workflow triggers on tags, so the tag is what triggers the release build.
+
+Never tag a commit that doesn't contain the matching version in `Cargo.toml`.
+
 ## Specification
 
 `spec.md` contains normative v1 rules not covered elsewhere: token validation requirements, HTTP timeouts, state cookie internals, the VTC test plan, and out-of-scope items. For the VMOD interface and VCL examples, see README.md.
