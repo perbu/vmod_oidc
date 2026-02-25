@@ -161,7 +161,7 @@ pub struct provider {
 /// }
 /// // No vcl_synth needed!
 /// ```
-#[varnish::vmod(docs = "README.md")]
+#[varnish::vmod(docs = "API.md")]
 mod oidc {
     use super::{CachedClaims, OidcBackend, provider};
     use crate::{Provider, ProviderConfig};
