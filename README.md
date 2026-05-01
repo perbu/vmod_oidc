@@ -129,6 +129,42 @@ sub vcl_recv {
 }
 ```
 
+## Pre-built releases
+
+Each tagged release on GitHub publishes four binaries, one per
+supported (Varnish version × CPU architecture) combination:
+
+```
+libvmod_oidc-varnish<VER>-amd64.so
+libvmod_oidc-varnish<VER>-arm64.so
+```
+
+Pick the binary matching your installed Varnish version and host
+architecture — the VMOD ABI is tied to the Varnish version it was
+linked against, so a `9.0.0` binary will not load on a `9.0.1` Varnish
+and vice versa.
+
+Currently supported: Varnish `9.0.0` and `9.0.1`, on `amd64` and
+`arm64`. Policy is to ship binaries for the current and previous
+Varnish point release; older versions are dropped from the matrix when
+a new one ships.
+
+Need a build for a different Varnish version? The matrix is one line in
+`.github/workflows/build.yml`:
+
+```yaml
+matrix:
+  varnish: ['9.0.0', '9.0.1']
+  arch: [amd64, arm64]
+```
+
+Add or edit a value, push, tag, and the release workflow produces the
+new binaries. The container image (`varnish:<VER>`) and the apt pin
+(`varnish-dev=<VER>-1~trixie`) are both derived from the matrix value.
+See `CLAUDE.md` for verification steps and the `-1~trixie` pin caveat
+(the apt repo defaults to "latest", which conflicts with the held
+runtime in the version-pinned container).
+
 ## Building from source
 
 ```sh
