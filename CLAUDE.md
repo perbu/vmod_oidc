@@ -82,6 +82,15 @@ Versions follow semver and are tracked in `Cargo.toml`. When bumping the version
 
 Never tag a commit that doesn't contain the matching version in `Cargo.toml`.
 
+### Supported Varnish versions
+
+The release workflow builds the VMOD against a hardcoded matrix of Varnish
+versions (see `varnish:` in `.github/workflows/build.yml`). Policy: support the
+current and previous Varnish point release. When a new Varnish version (e.g.
+9.0.2) is published, update the matrix to drop the oldest entry and add the new
+one — the VMOD ABI is tied to the Varnish version it was built against, so
+binaries are not interchangeable.
+
 ## Specification
 
 `spec.md` contains normative v1 rules not covered elsewhere: token validation requirements, HTTP timeouts, state cookie internals, the VTC test plan, and out-of-scope items. For the VMOD interface and VCL examples, see README.md.

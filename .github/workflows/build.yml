@@ -10,10 +10,21 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: build (varnish ${{ matrix.varnish }} / ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     container:
-      image: varnish:9.0
+      image: varnish:${{ matrix.varnish }}
       options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        varnish: ['9.0.0', '9.0.1']
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Install build tools and git
         run: |
@@ -36,7 +47,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-varnish${{ matrix.varnish }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy
         run: cargo clippy --features vmod --release -- -D warnings
@@ -54,14 +65,19 @@ jobs:
             varnishtest -D vmod="$(pwd)/target/release/libvmod_oidc.so" "$vtc"
           done
 
+      - name: Rename artifact
+        run: |
+          cp target/release/libvmod_oidc.so \
+             "libvmod_oidc-varnish${{ matrix.varnish }}-${{ matrix.arch }}.so"
+
       - name: Upload VMOD artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libvmod_oidc.so
-          path: target/release/libvmod_oidc.so
+          name: libvmod_oidc-varnish${{ matrix.varnish }}-${{ matrix.arch }}
+          path: libvmod_oidc-varnish${{ matrix.varnish }}-${{ matrix.arch }}.so
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/libvmod_oidc.so
+          files: libvmod_oidc-varnish${{ matrix.varnish }}-${{ matrix.arch }}.so
           generate_release_notes: true
