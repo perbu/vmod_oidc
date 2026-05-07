@@ -9,6 +9,12 @@ on:
 permissions:
   contents: write
 
+env:
+  # Run JavaScript actions on Node 24 even when they declare Node 20.
+  # Becomes the default on 2026-06-02; opting in early to silence
+  # deprecation warnings and surface any incompatibilities now.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     name: build (varnish ${{ matrix.varnish }} / ${{ matrix.arch }})
