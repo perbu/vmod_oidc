@@ -114,27 +114,27 @@ varnish v1 -vcl+backend {
 } -start
 
 client c1 {
-    txreq -url "/oidc/callback?code=expired&state=state-expired" -hdr "Cookie: __oidc_state=v1.AgQGCAoAAQMFBwkL2ZRwwQXHH_IroXkwhfrmgq5UwMxmax1_9JBmlRVm3rKiJWZC0YmRP53XOgfVmQWRy6KF2f9IgSBXGcu3xahThhRlmpuvii6DXeF_Uhm3d195A_sREdKgJE0rVg8ANbMiisi6K8q46R31lmJArwOSq6baMnI"
+    txreq -url "/oidc/callback?code=expired&state=state-expired" -hdr "Cookie: __oidc_state=v1.AgQGCAoAAQMFBwkL2ZRwwQXHH_IroXkwhfrmgq5UwMxmax1_9JBmlRVm3rKiJWZC0YmRP53XOgfVmQWRy6KF2f9IgSBXGcu3xahThhRlmpuvii6DXeF_Uhm3d195A_sREdKgJE0rVg8ANbMiisi6K9fJbwiX5OHP7nDs8pSSnKA"
     rxresp
     expect resp.status == 403
     expect resp.http.Set-Cookie == <undef>
 
-    txreq -url "/oidc/callback?code=wrong-aud&state=state-wrong-audience" -hdr "Cookie: __oidc_state=v1.AwYJAAIFCAsBBAcKtAHZXDu0XVe9bh1OFqTqhTpCGA7istK5N2SFSQCp2LVlAoNWOivNzS4G7keM8l29ZhTKUk7Gj4uoY0uqyF1uaHFKmb5ZtKdKQDsvzrTOhCUAlaoOi3qNjIlvcFm97zqvey5XIqTr05hslQKRd_KkfTU7lual-crmI0BE"
+    txreq -url "/oidc/callback?code=wrong-aud&state=state-wrong-audience" -hdr "Cookie: __oidc_state=v1.AwYJAAIFCAsBBAcKtAHZXDu0XVe9bh1OFqTqhTpCGA7istK5N2SFSQCp2LVlAoNWOivNzS4G7keM8l29ZhTKUk7Gj4uoY0uqyF1uaHFKmb5ZtKdKQDsvzrTOhCUAlaoOi3qNjIlvcFm97zqvey5XIqTr05hslQKMBnSxH0e4GafWh5PUa-6W"
     rxresp
     expect resp.status == 403
     expect resp.http.Set-Cookie == <undef>
 
-    txreq -url "/oidc/callback?code=wrong-iss&state=state-wrong-issuer" -hdr "Cookie: __oidc_state=v1.BAgBBQkCBgoDBwsAyp0meCrGRYpxPMdYYFHCHir3dU6-9hd3c736rlUarrZu8IEfTpgNuX70bmRPWKnoRp3H-as2g6l5NFITMeFAvSdkKd5viP1FjdBm_y4am-AkP0MUrnJvajDfS_Ug2xOydxgEZ5i5_ZZebY20-Yf-9BV1yfrc05_yaw"
+    txreq -url "/oidc/callback?code=wrong-iss&state=state-wrong-issuer" -hdr "Cookie: __oidc_state=v1.BAgBBQkCBgoDBwsAyp0meCrGRYpxPMdYYFHCHir3dU6-9hd3c736rlUarrZu8IEfTpgNuX70bmRPWKnoRp3H-as2g6l5NFITMeFAvSdkKd5viP1FjdBm_y4am-AkP0MUrnJvajDfS_Ug2xOydxgEZ5i5_ZZecPwy7OWMd5o0uoSF4ddcuQ"
     rxresp
     expect resp.status == 403
     expect resp.http.Set-Cookie == <undef>
 
-    txreq -url "/oidc/callback?code=wrong-sig&state=state-wrong-signature" -hdr "Cookie: __oidc_state=v1.BQoECQMIAgcBBgALjtnJYE45BtKrew7guPMeUH1KGlmFtPOEoCDYJnbW5fbvrBSD29yHp94WZP2VpyYmoV8SP8yHvetQ7ygj199LsEZXv6fVuZQhFjzFUHNBEJHYgxWJIBMHh0N1QVuhVREUFlOKpfEeR8ZS5grB68vqLnWYSouceL1sTzgeUg"
+    txreq -url "/oidc/callback?code=wrong-sig&state=state-wrong-signature" -hdr "Cookie: __oidc_state=v1.BQoECQMIAgcBBgALjtnJYE45BtKrew7guPMeUH1KGlmFtPOEoCDYJnbW5fbvrBSD29yHp94WZP2VpyYmoV8SP8yHvetQ7ygj199LsEZXv6fVuZQhFjzFUHNBEJHYgxWJIBMHh0N1QVuhVREUFlOKpfEeR8ZS5grB9rpsOxfqyQTdC8M1fXCwgA"
     rxresp
     expect resp.status == 403
     expect resp.http.Set-Cookie == <undef>
 
-    txreq -url "/oidc/callback?code=missing&state=state-missing-claims" -hdr "Cookie: __oidc_state=v1.BgAHAQgCCQMKBAsFfDGem0SQKFDclpILm3Okx0oLA_9WTuQw_E69ZjB5r5XruwWCG_PrK3oEH2yI0MNDlz3lrhKdUC57Pzk1pNIIFRIVL1D3djqyWaQuhTCha9cX1NGe23MVu8TgCuKSCFy7ANEeOYQ-SG18jlmx5G6KzR-SOm_n-5GmyA4D"
+    txreq -url "/oidc/callback?code=missing&state=state-missing-claims" -hdr "Cookie: __oidc_state=v1.BgAHAQgCCQMKBAsFfDGem0SQKFDclpILm3Okx0oLA_9WTuQw_E69ZjB5r5XruwWCG_PrK3oEH2yI0MNDlz3lrhKdUC57Pzk1pNIIFRIVL1D3djqyWaQuhTCha9cX1NGe23MVu8TgCuKSCFy7ANEeOYQ-SG18jlmsleifr20RtS6UhciUgKDR"
     rxresp
     expect resp.status == 403
     expect resp.http.Set-Cookie == <undef>

@@ -61,7 +61,7 @@ varnish v1 -vcl+backend {
 } -start
 
 client c1 {
-    txreq -url "/protected/resource" -hdr "Cookie: __oidc=v1.CwoJCAcGBQQDAgEA6zCCLoC1vuU8bS0tY4MnWNj-9duOxsGfAp5GrEdVdq-yZcQ2C1IwBRa_HuZHz6vpdlA324Eg9FpAh8V83nujSmxD1yOEISwrH0h8akX2VR1Mv07Ed9Fp5ObRzGOz1M4wnB0Y6CIlsK7hqRyR16E99dQ6Bz0lfRKUVaIxwMgOZmoEadn1LFR7Zr63wv-oGVXnoLQkwMY3vLzbFfF3RJZeiowyBsue6VcYrt8HbdOGRBxn-xc"
+    txreq -url "/protected/resource" -hdr "Cookie: __oidc=v1.CwoJCAcGBQQDAgEA6zCCLoC1vuU8bS0tY4MnWNj-9duOxsGfAp5GrEdVdq-yZcQ2C1IwBRa_HuZHz6vpdlA324Eg9FpAh8V83nujSmxD1yOEISwrFk1xaUL_Wh1Mv07Ed9Fp5ObRzGOz1M4wnB0Y6CIlsK7hqRyR16E99dQ6Bz0lfRKUVaIxwMgOZmoEadn1LFR7Zr63wv-oGVXnoLQkwMY3vLzbFfF3RJZeiowyBpvYRJuQb9JZOAdt80Te3Uk"
     rxresp
     expect resp.status == 302
     expect resp.http.Location ~ "^http://.*?/authorize\\?"

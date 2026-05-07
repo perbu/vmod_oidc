@@ -63,7 +63,7 @@ varnish v1 -vcl+backend {
 } -start
 
 client c1 {
-    txreq -url "/protected/resource" -hdr "Cookie: __oidc=v1.AAECAwQFBgcICQoL-ib7aGLFGCr5p6B2GcuP8Xr_NpL5lUd8wbal93-mCmQxi-weF9Wf8X5vpdMwPnvEZz5eiFdgk43ZCisUch96-BalU_oM1UBlr0tYK6ebD-HuMAjpHtgjEoOT2QkBnX63OzQB15TiX-sCv3fH5ur5-J4VL8XeF9LCJe2_SVoHFkzXqV8ju368_P8f0Qcfx9HhzS4idAbcguaBF7eDi_9yNrJopQwZxlJZSTjDuORd2u1pcA0m"
+    txreq -url "/protected/resource" -hdr "Cookie: __oidc=v1.AAECAwQFBgcICQoL-ib7aGLFGCr5p6B2GcuP8Xr_NpL5lUd8wbal93-mCmQxi-weF9Wf8X5vpdMwPnvEZz5eiFdgk43ZCisUch96-BalU_oM1UBlr0JdJqScBu7uMAjpHtgjEoOT2QkBnX63OzQB15TiX-sCv3fH5ur5-J4VL8XeF9LCJe2_SVoHFkzXqV8ju368_P8f0Qcfx9HhzS4idAbcguaBF7eDi_9yNrJopQzO8LI0O9lAELPT7RUIQECr"
     rxresp
     expect resp.status == 200
     expect resp.http.Location == <undef>

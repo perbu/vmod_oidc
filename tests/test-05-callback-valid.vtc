@@ -109,13 +109,13 @@ varnish v1 -vcl+backend {
 } -start
 
 client c1 {
-    txreq -url "/oidc/callback?code=ok-1&state=state-valid" -hdr "Cookie: __oidc_state=v1.AQMFBwkLAAIEBggKjGguXJDaQrm92Yqopx5oIlrJaudcBrF5-3CUTdk50agTWoLjA9BBaWkCChC2lPtrHfc_WTlqoTVpsHK3GQORm_nex68nH_Uhm-IGlhHNqy4LCMycE8NcmdZ2cZ3R5zcB_x9o3uawN-HA2Nkpg2suO44E"
+    txreq -url "/oidc/callback?code=ok-1&state=state-valid" -hdr "Cookie: __oidc_state=v1.AQMFBwkLAAIEBggKjGguXJDaQrm92Yqopx5oIlrJaudcBrF5-3CUTdk50agTWoLjA9BBaWkCChC2lPtrHfc_WTlqoTVpsHK3GQORm_nex68nH_Uhm-IGlhHNqy4LCMycE8NcmdZ2cZ3R5zcB_x91r2ClVZNDV5ha_TIccyDW"
     rxresp
     expect resp.status == 302
     expect resp.http.Set-Cookie ~ "^__oidc=v1\\."
     expect resp.http.Location == "/protected/resource?x=1"
 
-    txreq -url "/oidc/callback?code=ok-2&state=state-invalid-target" -hdr "Cookie: __oidc_state=v1.CggGBAIACwkHBQMBxa1kB-JpEk_ztYzylYbGdXdq4InlmNdIYExV56Dj_912wHvEstSj1-u2AGKPhu548BDn19Yg8j03mvlamIwTq6TaRwl1gt4pFJvpWZA_6hcQCfmGXaVaIq12CVFl3V4UbM4vOW06RFllgvpdCHKAj9_rm2inM1NKPqfK"
+    txreq -url "/oidc/callback?code=ok-2&state=state-invalid-target" -hdr "Cookie: __oidc_state=v1.CggGBAIACwkHBQMBxa1kB-JpEk_ztYzylYbGdXdq4InlmNdIYExV56Dj_912wHvEstSj1-u2AGKPhu548BDn19Yg8j03mvlamIwTq6TaRwl1gt4pFJvpWZA_6hcQCfmGXaVaIq12CVFl3V4UbM4vOW06RFllgvpAefSV7a1oFCnUTQp4dgkY"
     rxresp
     expect resp.status == 302
     expect resp.http.Set-Cookie ~ "^__oidc=v1\\."

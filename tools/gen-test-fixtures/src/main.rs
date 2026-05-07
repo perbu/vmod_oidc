@@ -1,4 +1,4 @@
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -17,6 +17,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const SESSION_COOKIE_PREFIX: &str = "v1.";
 const TEST_COOKIE_SECRET_HEX: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+// Must match the AAD constants in src/crypto.rs.
+const AAD_STATE: &[u8] = b"vmod_oidc/state-v1";
+const AAD_SESSION: &[u8] = b"vmod_oidc/session-v1";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::from_env(env::args().skip(1))?;
@@ -310,6 +313,7 @@ fn write_cookie_fixtures(
             &key,
             &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             &valid_session,
+            AAD_SESSION,
         )?,
     )?;
     fs::write(
@@ -318,11 +322,17 @@ fn write_cookie_fixtures(
             &key,
             &[11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
             &expired_session,
+            AAD_SESSION,
         )?,
     )?;
     fs::write(
         cookie_dir.join("state-valid.cookie"),
-        encrypt_cookie_json(&key, &[1, 3, 5, 7, 9, 11, 0, 2, 4, 6, 8, 10], &state_valid)?,
+        encrypt_cookie_json(
+            &key,
+            &[1, 3, 5, 7, 9, 11, 0, 2, 4, 6, 8, 10],
+            &state_valid,
+            AAD_STATE,
+        )?,
     )?;
     fs::write(
         cookie_dir.join("state-invalid-return-to.cookie"),
@@ -330,6 +340,7 @@ fn write_cookie_fixtures(
             &key,
             &[10, 8, 6, 4, 2, 0, 11, 9, 7, 5, 3, 1],
             &state_invalid_return_to,
+            AAD_STATE,
         )?,
     )?;
     fs::write(
@@ -338,6 +349,7 @@ fn write_cookie_fixtures(
             &key,
             &[2, 4, 6, 8, 10, 0, 1, 3, 5, 7, 9, 11],
             &state_expired,
+            AAD_STATE,
         )?,
     )?;
     fs::write(
@@ -346,6 +358,7 @@ fn write_cookie_fixtures(
             &key,
             &[3, 6, 9, 0, 2, 5, 8, 11, 1, 4, 7, 10],
             &state_wrong_audience,
+            AAD_STATE,
         )?,
     )?;
     fs::write(
@@ -354,6 +367,7 @@ fn write_cookie_fixtures(
             &key,
             &[4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11, 0],
             &state_wrong_issuer,
+            AAD_STATE,
         )?,
     )?;
     fs::write(
@@ -362,6 +376,7 @@ fn write_cookie_fixtures(
             &key,
             &[5, 10, 4, 9, 3, 8, 2, 7, 1, 6, 0, 11],
             &state_wrong_signature,
+            AAD_STATE,
         )?,
     )?;
     fs::write(
@@ -370,6 +385,7 @@ fn write_cookie_fixtures(
             &key,
             &[6, 0, 7, 1, 8, 2, 9, 3, 10, 4, 11, 5],
             &state_missing_claims,
+            AAD_STATE,
         )?,
     )?;
 
@@ -380,11 +396,18 @@ fn encrypt_cookie_json(
     key: &[u8; 32],
     nonce: &[u8; 12],
     payload: &serde_json::Value,
+    aad: &[u8],
 ) -> Result<String, Box<dyn Error>> {
     let cipher = Aes256Gcm::new(key.into());
     let plaintext = serde_json::to_vec(payload)?;
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(nonce), plaintext.as_ref())
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext.as_ref(),
+                aad,
+            },
+        )
         .map_err(|_| "aes-gcm encryption failed")?;
     let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
     out.extend_from_slice(nonce);
