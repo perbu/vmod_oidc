@@ -8,7 +8,7 @@ mod vmod;
 
 pub use error::OidcError;
 
-pub(crate) use crypto::{CookieCipher, StateCookie, decode_cookie_secret};
+pub(crate) use crypto::{AAD_SESSION, AAD_STATE, CookieCipher, StateCookie, decode_cookie_secret};
 pub(crate) use helpers::{
     build_set_cookie, cookie_value, derive_return_to, now_secs, query_param, random_token,
     validate_return_to, MAX_CLAIMS_BYTES,
@@ -160,10 +160,45 @@ pub(crate) fn format_claim_value(claims: &Map<String, Value>, name: &str) -> Str
     }
 }
 
+/// Reject `http://` URLs that point at non-loopback hosts. An on-path
+/// attacker who can rewrite cleartext discovery/JWKS/token traffic owns the
+/// entire OIDC flow, so we fail closed at startup. Loopback (`127.0.0.0/8`,
+/// `::1`, `localhost`) is allowed to keep mockito/varnishtest fixtures
+/// working without TLS.
+fn require_https_or_loopback(label: &str, raw: &str) -> Result<(), OidcError> {
+    let url = Url::parse(raw)
+        .map_err(|e| OidcError::InvalidConfig(format!("{label} is not a valid URL: {e}")))?;
+
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let is_loopback = match url.host() {
+                Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+                Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+                Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+                None => false,
+            };
+            if is_loopback {
+                Ok(())
+            } else {
+                Err(OidcError::InvalidConfig(format!(
+                    "{label} must use https (got http on non-loopback host)"
+                )))
+            }
+        }
+        other => Err(OidcError::InvalidConfig(format!(
+            "{label} has unsupported scheme '{other}'"
+        ))),
+    }
+}
+
 impl Provider {
     pub fn new(config: ProviderConfig) -> Result<Self, OidcError> {
         let config = config.normalize()?;
         let cookie_key = decode_cookie_secret(&config.cookie_secret)?;
+
+        require_https_or_loopback("discovery_url", &config.discovery_url)?;
+        require_https_or_loopback("redirect_uri", &config.redirect_uri)?;
 
         let redirect_uri_path = Url::parse(&config.redirect_uri)
             .map(|u| u.path().to_string())
@@ -177,6 +212,14 @@ impl Provider {
             .build()?;
 
         let discovery = fetch_discovery(&client, &config.discovery_url)?;
+        require_https_or_loopback("discovery.issuer", &discovery.issuer)?;
+        require_https_or_loopback(
+            "discovery.authorization_endpoint",
+            &discovery.authorization_endpoint,
+        )?;
+        require_https_or_loopback("discovery.token_endpoint", &discovery.token_endpoint)?;
+        require_https_or_loopback("discovery.jwks_uri", &discovery.jwks_uri)?;
+
         let jwks_cache = fetch_jwks_cache(&client, &discovery.jwks_uri)?;
 
         Ok(Self {
@@ -209,7 +252,7 @@ impl Provider {
             return_to,
         };
 
-        let state_cookie_value = self.cookie_cipher.encrypt_json(&state_cookie)?;
+        let state_cookie_value = self.cookie_cipher.encrypt_json(&state_cookie, AAD_STATE)?;
         let state_set_cookie = build_set_cookie(
             &self.config.state_cookie_name,
             &state_cookie_value,
@@ -244,7 +287,6 @@ impl Provider {
         let path = url.split('?').next().unwrap_or(url);
 
         if path == self.redirect_uri_path {
-            // Callback path: validate state, exchange code, redirect to return-to
             let code = self.callback_code(url);
             if code.is_empty() {
                 return OidcBackendResponse::Error { status: 403 };
@@ -263,7 +305,6 @@ impl Provider {
                 session_set_cookie: session_cookie,
             }
         } else {
-            // Login redirect path: generate authorization URL
             match self.authorization_url(url) {
                 Ok(start) => OidcBackendResponse::LoginRedirect {
                     location: start.url,
@@ -325,7 +366,7 @@ impl Provider {
             ));
         }
 
-        let value = self.cookie_cipher.encrypt_json(claims)?;
+        let value = self.cookie_cipher.encrypt_json(claims, AAD_SESSION)?;
         Ok(build_set_cookie(
             &self.config.cookie_name,
             &value,
@@ -394,6 +435,10 @@ impl Provider {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[self.discovery.issuer.as_str()]);
         validation.set_audience(&[self.config.client_id.as_str()]);
+        // jsonwebtoken defaults `validate_nbf=false` and `leeway=60`. Honor
+        // `nbf` when the IdP includes it, and tighten the skew tolerance.
+        validation.validate_nbf = true;
+        validation.leeway = 30;
         validation.required_spec_claims = HashSet::from([
             "exp".to_string(),
             "iat".to_string(),
@@ -516,7 +561,9 @@ impl Provider {
         let raw_state_cookie = cookie_value(cookie_header, &self.config.state_cookie_name)
             .ok_or(OidcError::InvalidState)?;
 
-        let state: StateCookie = self.cookie_cipher.decrypt_json(raw_state_cookie)?;
+        let state: StateCookie = self
+            .cookie_cipher
+            .decrypt_json(raw_state_cookie, AAD_STATE)?;
         if state.exp <= now_secs() {
             return Err(OidcError::InvalidState);
         }
@@ -534,7 +581,7 @@ impl Provider {
     ) -> Result<Map<String, Value>, OidcError> {
         let raw_cookie = cookie_value(cookie_header, &self.config.cookie_name)
             .ok_or_else(|| OidcError::InvalidToken("session cookie missing".to_string()))?;
-        let claims: Value = self.cookie_cipher.decrypt_json(raw_cookie)?;
+        let claims: Value = self.cookie_cipher.decrypt_json(raw_cookie, AAD_SESSION)?;
         let Value::Object(obj) = claims else {
             return Err(OidcError::InvalidToken(
                 "claims payload must be an object".to_string(),
@@ -888,7 +935,7 @@ mod tests {
 
         let value = provider
             .cookie_cipher
-            .encrypt_json(&state_cookie)
+            .encrypt_json(&state_cookie, AAD_STATE)
             .expect("state cookie should encrypt");
         let cookie_header = format!("{}={value}", provider.config.state_cookie_name);
 
@@ -1205,7 +1252,7 @@ mod tests {
         // Encrypt a JSON array — should be rejected by the as_object() check.
         let array_value = provider
             .cookie_cipher
-            .encrypt_json(&json!(["not", "an", "object"]))
+            .encrypt_json(&json!(["not", "an", "object"]), AAD_SESSION)
             .expect("encrypt should succeed");
         let cookie_header = format!("{}={array_value}", provider.config.cookie_name);
         assert!(
@@ -1216,7 +1263,7 @@ mod tests {
         // Encrypt a plain string — also not an object.
         let string_value = provider
             .cookie_cipher
-            .encrypt_json(&json!("just a string"))
+            .encrypt_json(&json!("just a string"), AAD_SESSION)
             .expect("encrypt should succeed");
         let cookie_header = format!("{}={string_value}", provider.config.cookie_name);
         assert!(

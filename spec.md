@@ -5,10 +5,10 @@ Normative rules and design decisions not covered by README.md (user-facing API d
 ## Implementation rules (v1, normative)
 
 - The embedded HTTP client MUST be synchronous (`reqwest::blocking::Client`). The VMOD MUST NOT require an async runtime (Tokio/async-std) in Varnish worker threads.
-- ID token validation: `aud` MUST include `client_id`, `exp` MUST be in the future, `iat` MUST be present.
+- ID token validation: `iss` MUST match the discovery `issuer`, `aud` MUST include `client_id`, `exp` MUST be in the future, `iat` MUST be present, `nbf` (when present) MUST not be in the future. Clock skew tolerance is 30 seconds.
 - `nonce` in ID token MUST match the nonce persisted with the corresponding `state`.
 - All auth validation failures MUST fail closed (`session_valid()` returns `FALSE`; `exchange_code_for_session()` returns empty string).
-- `return_to` MUST start with `/`, MUST NOT start with `//`, and MUST NOT contain scheme/host.
+- `return_to` MUST start with `/`, MUST NOT start with `//`, MUST NOT contain a scheme/host (`://`), MUST NOT contain backslashes (some browsers normalize `\` to `/`, turning `/\evil` into `//evil`), and MUST NOT contain ASCII control characters (defense-in-depth against CRLF/header injection in `Location`).
 - `return_to` MAY include query string; URL fragments are ignored.
 - Callback redirect resolution is one-time use for the auth transaction; invalid/expired state or invalid `return_to` resolves to `/`.
 
@@ -33,11 +33,16 @@ Normative rules and design decisions not covered by README.md (user-facing API d
 
 ## State cookie internals
 
-- Contains `{state, nonce, exp, return_to}` encrypted with the same AES-GCM scheme and `v1.` version prefix as the session cookie.
+- Contains `{state, nonce, exp, return_to}` encrypted with the same AES-GCM key and `v1.` version prefix as the session cookie, but with **distinct AAD** so the two cookie types cannot be substituted for one another under the shared key. Current AAD strings: `"vmod_oidc/state-v1"` for the state cookie and `"vmod_oidc/session-v1"` for the session cookie.
 - `callback_state_valid()` checks decryption success, expiry, and exact state match.
 - `callback_redirect_target()` returns validated `return_to` from state data, or `/` fallback.
 - Replay within TTL is primarily mitigated by OAuth authorization code one-time use at the provider.
 - No separate HMAC is used; authenticity/integrity is provided by the GCM tag.
+
+## Transport security
+
+- `discovery_url`, `redirect_uri`, and the `issuer`/`authorization_endpoint`/`token_endpoint`/`jwks_uri` returned from the discovery document MUST use `https://`. Loopback hosts (`127.0.0.0/8`, `::1`, `localhost`) MAY use `http://` for local development and tests.
+- Validation runs at `Provider::new`. A non-loopback `http://` URL fails initialization closed.
 
 ## VTC test plan
 

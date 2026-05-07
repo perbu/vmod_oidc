@@ -1,4 +1,4 @@
-use aes_gcm::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
+use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload, rand_core::RngCore};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::OidcError;
 
 pub(crate) const SESSION_COOKIE_PREFIX: &str = "v1.";
+
+// AAD bound on encrypt/decrypt so a state cookie ciphertext cannot be
+// reinterpreted as a session cookie (or vice versa) under the shared key.
+pub(crate) const AAD_STATE: &[u8] = b"vmod_oidc/state-v1";
+pub(crate) const AAD_SESSION: &[u8] = b"vmod_oidc/session-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StateCookie {
@@ -28,14 +33,24 @@ impl CookieCipher {
         }
     }
 
-    pub(crate) fn encrypt_json<T: Serialize>(&self, value: &T) -> Result<String, OidcError> {
+    pub(crate) fn encrypt_json<T: Serialize>(
+        &self,
+        value: &T,
+        aad: &[u8],
+    ) -> Result<String, OidcError> {
         let payload = serde_json::to_vec(value)?;
         let mut nonce = [0u8; 12];
         OsRng.fill_bytes(&mut nonce);
 
         let ciphertext = self
             .cipher
-            .encrypt(Nonce::from_slice(&nonce), payload.as_ref())
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: payload.as_ref(),
+                    aad,
+                },
+            )
             .map_err(|_| OidcError::Crypto)?;
 
         let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
@@ -48,7 +63,11 @@ impl CookieCipher {
         ))
     }
 
-    pub(crate) fn decrypt_json<T: DeserializeOwned>(&self, value: &str) -> Result<T, OidcError> {
+    pub(crate) fn decrypt_json<T: DeserializeOwned>(
+        &self,
+        value: &str,
+        aad: &[u8],
+    ) -> Result<T, OidcError> {
         let encoded = value
             .strip_prefix(SESSION_COOKIE_PREFIX)
             .ok_or(OidcError::Crypto)?;
@@ -63,7 +82,13 @@ impl CookieCipher {
         let (nonce, ciphertext) = raw.split_at(12);
         let plaintext = self
             .cipher
-            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|_| OidcError::Crypto)?;
 
         Ok(serde_json::from_slice(&plaintext)?)

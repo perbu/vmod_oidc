@@ -79,6 +79,22 @@ pub(crate) fn validate_return_to(input: &str) -> String {
         return "/".to_string();
     }
 
+    // Browsers normalize `\` to `/`, so `/\evil.com` would render as the
+    // protocol-relative `//evil.com`. Reject any backslash defensively.
+    if no_fragment.contains('\\') {
+        return "/".to_string();
+    }
+
+    // Reject ASCII control bytes (incl. CR/LF/NUL) so that even if Url::parse
+    // failed upstream and the raw string ends up in a Location header, we
+    // cannot smuggle CRLF or other control characters.
+    if no_fragment
+        .bytes()
+        .any(|b| b < 0x20 || b == 0x7f)
+    {
+        return "/".to_string();
+    }
+
     no_fragment.to_string()
 }
 
@@ -119,5 +135,18 @@ mod tests {
 
         let huge = format!("/{}", "a".repeat(MAX_RETURN_TO_LEN + 1));
         assert_eq!(validate_return_to(&huge), "/");
+    }
+
+    #[test]
+    fn return_to_rejects_backslash_and_control_chars() {
+        // Browsers may normalize `/\evil.com` to `//evil.com`.
+        assert_eq!(validate_return_to("/\\evil.com"), "/");
+        assert_eq!(validate_return_to("/foo\\bar"), "/");
+        // CRLF and other control characters must never reach Location.
+        assert_eq!(validate_return_to("/foo\r\nSet-Cookie: x=y"), "/");
+        assert_eq!(validate_return_to("/foo\x00bar"), "/");
+        assert_eq!(validate_return_to("/foo\x7fbar"), "/");
+        // Sanity check: ordinary path with query is still accepted.
+        assert_eq!(validate_return_to("/ok?a=1&b=2"), "/ok?a=1&b=2");
     }
 }
