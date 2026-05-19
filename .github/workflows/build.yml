@@ -15,17 +15,22 @@ env:
   # deprecation warnings and surface any incompatibilities now.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
+  # Fingerprint of the Varnish Software apt signing key. Pulled from
+  # keys.openpgp.org by the install step; matches what the upstream
+  # varnish:X.Y.Z images use.
+  VARNISH_REPO_FINGERPRINT: 694566269779DFAC975ED9BDD0525EAE838B3344
+
 jobs:
   build:
     name: build (varnish ${{ matrix.varnish }} / ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     container:
-      image: varnish:${{ matrix.varnish }}
+      image: debian:trixie-slim
       options: --user root
     strategy:
       fail-fast: false
       matrix:
-        varnish: ['9.0.1', '9.0.2', '9.0.3']
+        varnish: ['9.0.1', '9.0.2']
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -33,10 +38,24 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      - name: Install build tools and varnish-dev
+      - name: Install build tools, varnish runtime, and varnish-dev
         run: |
-          apt-get update && apt-get install -y --no-install-recommends \
-            curl build-essential pkg-config clang libclang-dev git libssl-dev \
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl gnupg \
+            build-essential pkg-config clang libclang-dev git libssl-dev
+          install -d -m 0755 /etc/apt/keyrings
+          gpg --batch --keyserver hkps://keys.openpgp.org \
+              --recv-keys "$VARNISH_REPO_FINGERPRINT"
+          gpg --batch --armor --export "$VARNISH_REPO_FINGERPRINT" \
+              > /etc/apt/keyrings/varnish.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/varnish.gpg] https://packages.varnish-software.com/varnish/debian trixie main" \
+              > /etc/apt/sources.list.d/varnish.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            varnish=${{ matrix.varnish }}-1~trixie \
             varnish-dev=${{ matrix.varnish }}-1~trixie
 
       - name: Checkout

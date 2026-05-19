@@ -104,36 +104,48 @@ versions, edit one line:
 
 ```yaml
 matrix:
-  varnish: ['9.0.0', '9.0.1']    # ← edit this list
+  varnish: ['9.0.1', '9.0.2']    # ← edit this list
   arch: [amd64, arm64]
 ```
 
-The workflow uses two version-derived references:
+The workflow runs in a plain `debian:trixie-slim` container and installs
+both the `varnish` runtime (needed for `varnishtest`) and `varnish-dev`
+(needed for VMOD linkage) from
+`packages.varnish-software.com/varnish/debian`. The matrix value drives
+the apt pins:
 
-1. The container image — `image: varnish:${{ matrix.varnish }}` — pulled
-   from `library/varnish` on Docker Hub.
-2. The dev package pin — `varnish-dev=${{ matrix.varnish }}-1~trixie` —
-   resolved against `packages.varnish-software.com/varnish/debian`. The
-   pin is required because that apt repo's default resolution always
-   picks the latest `varnish-dev`, which depends on the matching
-   `varnish` runtime and conflicts with the held version inside the
-   `varnish:X.Y.Z` container.
+```
+varnish=${{ matrix.varnish }}-1~trixie
+varnish-dev=${{ matrix.varnish }}-1~trixie
+```
 
-Before adding a version, verify both sources have it:
+The pin is required because the apt repo's default resolution always
+picks the latest version, and the VMOD ABI is tied to the exact Varnish
+version it links against.
+
+We deliberately do **not** base on the upstream `varnish:X.Y.Z` Docker
+images. That registry lags behind the apt repo (e.g. 9.0.2 shipped to
+apt before Docker Hub had it), so coupling CI to it produces preventable
+failures. The apt repo is the source of truth.
+
+Before adding a version, verify the apt repo has it on both arches:
 
 ```sh
-# Docker Hub tag exists?
-curl -sf "https://hub.docker.com/v2/repositories/library/varnish/tags?name=<VER>" \
-  | grep -o '"name":"<VER>"'
-
-# varnish-dev=<VER>-1~trixie exists in apt?
-curl -sf "https://packages.varnish-software.com/varnish/debian/dists/trixie/main/binary-amd64/Packages" \
-  | grep -A1 "Version: <VER>-1~trixie"
+for arch in amd64 arm64; do
+  echo "=== $arch ==="
+  curl -sf "https://packages.varnish-software.com/varnish/debian/dists/trixie/main/binary-$arch/Packages" \
+    | grep -B1 "Version: <VER>-1~trixie" | head
+done
 ```
 
 If the package revision is anything other than `-1~trixie` (e.g. a
 re-package shipped as `-2~trixie`), update the pin in the
-`Install build tools and varnish-dev` step accordingly.
+`Install build tools, varnish runtime, and varnish-dev` step accordingly.
+
+The signing key for the Varnish Software apt repo is pulled at build
+time from `keys.openpgp.org` using the fingerprint stored in the
+workflow's `VARNISH_REPO_FINGERPRINT` env var. If Varnish Software ever
+rotates the key, update that fingerprint.
 
 #### Adding an architecture
 
