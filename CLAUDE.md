@@ -104,7 +104,7 @@ versions, edit one line:
 
 ```yaml
 matrix:
-  varnish: ['9.0.1', '9.0.2']    # ← edit this list
+  varnish: ['9.0.2', '9.0.3']    # ← edit this list
   arch: [amd64, arm64]
 ```
 

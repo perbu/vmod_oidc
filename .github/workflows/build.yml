@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        varnish: ['9.0.1', '9.0.2']
+        varnish: ['9.0.2', '9.0.3']
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -44,7 +44,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl gnupg \
+            ca-certificates curl gnupg gpg-agent dirmngr \
             build-essential pkg-config clang libclang-dev git libssl-dev
           install -d -m 0755 /etc/apt/keyrings
           gpg --batch --keyserver hkps://keys.openpgp.org \
