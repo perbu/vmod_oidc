@@ -4,7 +4,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub(crate) const MAX_RETURN_TO_LEN: usize = 2048;
-pub(crate) const MAX_CLAIMS_BYTES: usize = 3072;
+// Browsers cap a cookie at 4096 bytes of name+value. The encrypted value is
+// "v1." + base64url(12-byte nonce || ciphertext || 16-byte GCM tag), so P
+// plaintext bytes become 3 + ceil((P+28)*4/3) value bytes. 2900 keeps the
+// value at ~3908 bytes, leaving ~180 bytes of headroom for the cookie name.
+pub(crate) const MAX_CLAIMS_BYTES: usize = 2900;
 
 pub(crate) fn cookie_value<'a>(cookie_header: Option<&'a str>, cookie_name: &str) -> Option<&'a str> {
     cookie_header.and_then(|cookie_header| {
@@ -96,6 +100,18 @@ pub(crate) fn validate_return_to(input: &str) -> String {
     }
 
     no_fragment.to_string()
+}
+
+/// Compare two secrets without an early exit on the first differing byte,
+/// so response timing does not leak how much of a guess was correct.
+/// (Length is still compared directly; leaking the length of a random
+/// token is harmless.)
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub(crate) fn random_token(len: usize) -> String {

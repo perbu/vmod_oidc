@@ -11,8 +11,11 @@ pub(crate) const SESSION_COOKIE_PREFIX: &str = "v1.";
 
 // AAD bound on encrypt/decrypt so a state cookie ciphertext cannot be
 // reinterpreted as a session cookie (or vice versa) under the shared key.
-pub(crate) const AAD_STATE: &[u8] = b"vmod_oidc/state-v1";
-pub(crate) const AAD_SESSION: &[u8] = b"vmod_oidc/session-v1";
+// The issuer and client_id are appended so cookies minted for one provider
+// cannot be replayed against another provider that shares the same
+// cookie_secret. Mirrored in tools/gen-test-fixtures.
+const AAD_STATE_PREFIX: &str = "vmod_oidc/state-v1";
+const AAD_SESSION_PREFIX: &str = "vmod_oidc/session-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StateCookie {
@@ -24,16 +27,36 @@ pub(crate) struct StateCookie {
 
 pub(crate) struct CookieCipher {
     cipher: Aes256Gcm,
+    aad_state: Vec<u8>,
+    aad_session: Vec<u8>,
 }
 
 impl CookieCipher {
-    pub(crate) fn new(key: [u8; 32]) -> Self {
+    pub(crate) fn new(key: [u8; 32], issuer: &str, client_id: &str) -> Self {
         Self {
             cipher: Aes256Gcm::new((&key).into()),
+            aad_state: format!("{AAD_STATE_PREFIX}|{issuer}|{client_id}").into_bytes(),
+            aad_session: format!("{AAD_SESSION_PREFIX}|{issuer}|{client_id}").into_bytes(),
         }
     }
 
-    pub(crate) fn encrypt_json<T: Serialize>(
+    pub(crate) fn encrypt_state(&self, value: &StateCookie) -> Result<String, OidcError> {
+        self.encrypt_json(value, &self.aad_state)
+    }
+
+    pub(crate) fn decrypt_state(&self, value: &str) -> Result<StateCookie, OidcError> {
+        self.decrypt_json(value, &self.aad_state)
+    }
+
+    pub(crate) fn encrypt_session<T: Serialize>(&self, value: &T) -> Result<String, OidcError> {
+        self.encrypt_json(value, &self.aad_session)
+    }
+
+    pub(crate) fn decrypt_session<T: DeserializeOwned>(&self, value: &str) -> Result<T, OidcError> {
+        self.decrypt_json(value, &self.aad_session)
+    }
+
+    fn encrypt_json<T: Serialize>(
         &self,
         value: &T,
         aad: &[u8],
@@ -63,7 +86,7 @@ impl CookieCipher {
         ))
     }
 
-    pub(crate) fn decrypt_json<T: DeserializeOwned>(
+    fn decrypt_json<T: DeserializeOwned>(
         &self,
         value: &str,
         aad: &[u8],

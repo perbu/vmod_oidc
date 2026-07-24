@@ -53,7 +53,9 @@ state cookies. Accepts hex, base64, or base64url encoding.
 * `[STRING cookie_name]`:
 Name of the session cookie. Defaults to `__oidc`.
 * `[DURATION cookie_ttl]`:
-Session cookie lifetime. Defaults to 1 hour.
+Session lifetime. The session's expiry is set to now + cookie_ttl
+when it is created after a successful login, independent of the
+ID token's own `exp`. Defaults to 1 hour.
 * `[DURATION state_cookie_ttl]`:
 State cookie lifetime (used during the login flow). Defaults to 5 minutes.
 * `[BOOL cookie_secure]`:

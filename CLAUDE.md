@@ -62,7 +62,7 @@ Stateless, cookie-based. Session data is AES-256-GCM encrypted and stored direct
 
 - **Fail-closed**: All validation failures return empty string or `false` — never leak partial data.
 - **Issuer validation always enabled**: No `skip_issuer_check` mode in v1.
-- **Claims size limit**: 3072 bytes max serialized JSON.
+- **Claims size limit**: 2900 bytes max serialized JSON (keeps the encrypted cookie under the 4096-byte browser cap).
 - **Return-to path limit**: 2048 bytes, must be relative (no scheme/host).
 
 ### Feature Flags
