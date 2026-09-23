@@ -8,10 +8,10 @@ mod vmod;
 
 pub use error::OidcError;
 
-pub(crate) use crypto::{AAD_SESSION, AAD_STATE, CookieCipher, StateCookie, decode_cookie_secret};
+pub(crate) use crypto::{CookieCipher, StateCookie, decode_cookie_secret};
 pub(crate) use helpers::{
-    build_set_cookie, cookie_value, derive_return_to, now_secs, query_param, random_token,
-    validate_return_to, MAX_CLAIMS_BYTES,
+    build_set_cookie, constant_time_eq, cookie_value, derive_return_to, now_secs, query_param,
+    random_token, validate_return_to, MAX_CLAIMS_BYTES,
 };
 pub(crate) use jwks::{
     DiscoveryDocument, JwksCache, RsaKeyMaterial, TokenResponse, fetch_discovery, fetch_jwks_cache,
@@ -135,6 +135,8 @@ pub enum OidcBackendResponse {
     CallbackSuccess {
         location: String,
         session_set_cookie: String,
+        /// Expires the state cookie, which is single-use and no longer needed.
+        state_clear_cookie: String,
     },
     /// An error occurred during the OIDC flow.
     Error { status: u16 },
@@ -150,13 +152,22 @@ pub struct Provider {
 }
 
 pub(crate) fn format_claim_value(claims: &Map<String, Value>, name: &str) -> String {
-    match claims.get(name) {
+    let value = match claims.get(name) {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::Bool(v)) => v.to_string(),
         Some(Value::Array(v)) => serde_json::to_string(v).unwrap_or_default(),
         Some(Value::Object(v)) => serde_json::to_string(v).unwrap_or_default(),
         _ => String::new(),
+    };
+
+    // Claim values often carry end-user-controlled data (e.g. `name`) and the
+    // documented usage puts them in HTTP headers from VCL. Strip ASCII control
+    // bytes so a hostile claim cannot smuggle CRLF into a header.
+    if value.bytes().any(|b| b.is_ascii_control()) {
+        value.chars().filter(|c| !c.is_ascii_control()).collect()
+    } else {
+        value
     }
 }
 
@@ -221,12 +232,13 @@ impl Provider {
         require_https_or_loopback("discovery.jwks_uri", &discovery.jwks_uri)?;
 
         let jwks_cache = fetch_jwks_cache(&client, &discovery.jwks_uri)?;
+        let cookie_cipher = CookieCipher::new(cookie_key, &discovery.issuer, &config.client_id);
 
         Ok(Self {
             config,
             client,
             discovery,
-            cookie_cipher: CookieCipher::new(cookie_key),
+            cookie_cipher,
             jwks_cache: Mutex::new(jwks_cache),
             redirect_uri_path,
         })
@@ -252,7 +264,7 @@ impl Provider {
             return_to,
         };
 
-        let state_cookie_value = self.cookie_cipher.encrypt_json(&state_cookie, AAD_STATE)?;
+        let state_cookie_value = self.cookie_cipher.encrypt_state(&state_cookie)?;
         let state_set_cookie = build_set_cookie(
             &self.config.state_cookie_name,
             &state_cookie_value,
@@ -287,23 +299,8 @@ impl Provider {
         let path = url.split('?').next().unwrap_or(url);
 
         if path == self.redirect_uri_path {
-            let code = self.callback_code(url);
-            if code.is_empty() {
-                return OidcBackendResponse::Error { status: 403 };
-            }
-            if !self.callback_state_valid(url, cookie_header) {
-                return OidcBackendResponse::Error { status: 403 };
-            }
-            let session_cookie =
-                self.exchange_code_for_session(&code, url, cookie_header);
-            if session_cookie.is_empty() {
-                return OidcBackendResponse::Error { status: 403 };
-            }
-            let location = self.callback_redirect_target(url, cookie_header);
-            OidcBackendResponse::CallbackSuccess {
-                location,
-                session_set_cookie: session_cookie,
-            }
+            self.handle_callback(url, cookie_header)
+                .unwrap_or(OidcBackendResponse::Error { status: 403 })
         } else {
             match self.authorization_url(url) {
                 Ok(start) => OidcBackendResponse::LoginRedirect {
@@ -313,6 +310,35 @@ impl Provider {
                 Err(_) => OidcBackendResponse::Error { status: 500 },
             }
         }
+    }
+
+    fn handle_callback(
+        &self,
+        url: &str,
+        cookie_header: Option<&str>,
+    ) -> Result<OidcBackendResponse, OidcError> {
+        let code = self.callback_code(url);
+        if code.trim().is_empty() {
+            return Err(OidcError::InvalidToken(
+                "missing authorization code".to_string(),
+            ));
+        }
+
+        let state = self.load_valid_state(url, cookie_header)?;
+        let id_token = self.exchange_for_id_token(&code)?;
+        let claims = self.validate_id_token(&id_token, &state.nonce)?;
+        let session_set_cookie = self.create_session_cookie_from_claims(&claims)?;
+
+        Ok(OidcBackendResponse::CallbackSuccess {
+            location: validate_return_to(&state.return_to),
+            session_set_cookie,
+            state_clear_cookie: build_set_cookie(
+                &self.config.state_cookie_name,
+                "",
+                0,
+                self.config.cookie_secure,
+            ),
+        })
     }
 
     pub fn callback_code(&self, callback_url: &str) -> String {
@@ -358,15 +384,31 @@ impl Provider {
         }
     }
 
+    /// Encrypts `claims` into a session cookie. The `exp` claim is rewritten
+    /// to `now + cookie_ttl` — the ID token's own expiry was already enforced
+    /// during validation, and the session lifetime is governed by `cookie_ttl`
+    /// alone.
     pub fn create_session_cookie_from_claims(&self, claims: &Value) -> Result<String, OidcError> {
-        let bytes = serde_json::to_vec(claims)?;
-        if bytes.len() > MAX_CLAIMS_BYTES {
+        let Value::Object(claims) = claims else {
             return Err(OidcError::InvalidToken(
-                "serialized claims exceeds 3072 bytes".to_string(),
+                "claims payload must be an object".to_string(),
             ));
+        };
+
+        let mut claims = claims.clone();
+        claims.insert(
+            "exp".to_string(),
+            Value::from(now_secs().saturating_add(self.config.cookie_ttl_secs)),
+        );
+
+        let bytes = serde_json::to_vec(&claims)?;
+        if bytes.len() > MAX_CLAIMS_BYTES {
+            return Err(OidcError::InvalidToken(format!(
+                "serialized claims exceeds {MAX_CLAIMS_BYTES} bytes"
+            )));
         }
 
-        let value = self.cookie_cipher.encrypt_json(claims, AAD_SESSION)?;
+        let value = self.cookie_cipher.encrypt_session(&claims)?;
         Ok(build_set_cookie(
             &self.config.cookie_name,
             &value,
@@ -460,11 +502,29 @@ impl Provider {
             .and_then(Value::as_str)
             .ok_or_else(|| OidcError::InvalidToken("sub claim missing".to_string()))?;
 
-        if nonce != expected_nonce {
+        if !constant_time_eq(nonce, expected_nonce) {
             return Err(OidcError::InvalidToken("nonce mismatch".to_string()));
         }
         if sub.is_empty() {
             return Err(OidcError::InvalidToken("sub claim missing".to_string()));
+        }
+
+        // OIDC Core 3.1.3.7: with multiple audiences an azp claim must be
+        // present, and when azp is present it must be our client_id.
+        if let Some(Value::Array(aud)) = token_data.claims.get("aud")
+            && aud.len() > 1
+            && token_data.claims.get("azp").is_none()
+        {
+            return Err(OidcError::InvalidToken(
+                "multiple audiences but azp claim missing".to_string(),
+            ));
+        }
+        if let Some(azp) = token_data.claims.get("azp")
+            && azp.as_str() != Some(self.config.client_id.as_str())
+        {
+            return Err(OidcError::InvalidToken(
+                "azp claim does not match client_id".to_string(),
+            ));
         }
 
         Ok(token_data.claims)
@@ -477,13 +537,13 @@ impl Provider {
         };
 
         if expired {
-            self.refresh_jwks(true)?;
+            self.refresh_jwks()?;
         }
 
         Ok(())
     }
 
-    fn refresh_jwks(&self, required_for_request: bool) -> Result<(), OidcError> {
+    fn refresh_jwks(&self) -> Result<(), OidcError> {
         let now = now_secs();
         let prev_expires_at;
         {
@@ -493,10 +553,6 @@ impl Provider {
                 return Err(OidcError::InvalidToken(
                     "jwks refresh in backoff window".to_string(),
                 ));
-            }
-
-            if !required_for_request && now < cache.expires_at {
-                return Ok(());
             }
 
             prev_expires_at = cache.expires_at;
@@ -531,7 +587,7 @@ impl Provider {
                 .map_err(|e| OidcError::InvalidToken(format!("invalid jwk: {e}")));
         }
 
-        self.refresh_jwks(true)?;
+        self.refresh_jwks()?;
 
         if let Some(key) = self.lookup_key(kid)? {
             return DecodingKey::from_rsa_components(&key.n, &key.e)
@@ -561,14 +617,12 @@ impl Provider {
         let raw_state_cookie = cookie_value(cookie_header, &self.config.state_cookie_name)
             .ok_or(OidcError::InvalidState)?;
 
-        let state: StateCookie = self
-            .cookie_cipher
-            .decrypt_json(raw_state_cookie, AAD_STATE)?;
+        let state: StateCookie = self.cookie_cipher.decrypt_state(raw_state_cookie)?;
         if state.exp <= now_secs() {
             return Err(OidcError::InvalidState);
         }
 
-        if state.state != expected_state {
+        if !constant_time_eq(&state.state, &expected_state) {
             return Err(OidcError::InvalidState);
         }
 
@@ -581,7 +635,7 @@ impl Provider {
     ) -> Result<Map<String, Value>, OidcError> {
         let raw_cookie = cookie_value(cookie_header, &self.config.cookie_name)
             .ok_or_else(|| OidcError::InvalidToken("session cookie missing".to_string()))?;
-        let claims: Value = self.cookie_cipher.decrypt_json(raw_cookie, AAD_SESSION)?;
+        let claims: Value = self.cookie_cipher.decrypt_session(raw_cookie)?;
         let Value::Object(obj) = claims else {
             return Err(OidcError::InvalidToken(
                 "claims payload must be an object".to_string(),
@@ -631,76 +685,49 @@ mod tests {
         }
     }
 
-    fn setup_provider_server() -> (mockito::ServerGuard, Provider) {
+    const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
+    const JWKS_PATH: &str = "/jwks";
+    const TOKEN_PATH: &str = "/token";
+    const DUMMY_JWKS_JSON: &str =
+        "{\"keys\":[{\"kty\":\"RSA\",\"alg\":\"RS256\",\"kid\":\"test-key\",\"n\":\"AQAB\",\"e\":\"AQAB\"}]}";
+
+    /// Start a mockito server with discovery and JWKS endpoints mocked.
+    fn mock_idp(jwks_body: &str) -> mockito::ServerGuard {
         let mut server = mockito::Server::new();
 
-        let discovery_path = "/.well-known/openid-configuration";
-        let jwks_path = "/jwks";
-        let token_path = "/token";
-
         server
-            .mock("GET", discovery_path)
+            .mock("GET", DISCOVERY_PATH)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(format!(
-                "{{\"issuer\":\"{}\",\"authorization_endpoint\":\"{}/authorize\",\"token_endpoint\":\"{}{}\",\"jwks_uri\":\"{}{}\"}}",
+                "{{\"issuer\":\"{0}\",\"authorization_endpoint\":\"{0}/authorize\",\"token_endpoint\":\"{0}{TOKEN_PATH}\",\"jwks_uri\":\"{0}{JWKS_PATH}\"}}",
                 server.url(),
-                server.url(),
-                server.url(),
-                token_path,
-                server.url(),
-                jwks_path
             ))
             .create();
 
         server
-            .mock("GET", jwks_path)
+            .mock("GET", JWKS_PATH)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_header("cache-control", "max-age=120")
-            .with_body(
-                "{\"keys\":[{\"kty\":\"RSA\",\"alg\":\"RS256\",\"kid\":\"test-key\",\"n\":\"AQAB\",\"e\":\"AQAB\"}]}",
-            )
+            .with_body(jwks_body)
             .create();
 
-        let provider = Provider::new(test_config(format!("{}{}", server.url(), discovery_path)))
-            .expect("provider should initialize");
+        server
+    }
 
+    fn setup_server_with_jwks(jwks_body: &str) -> (mockito::ServerGuard, Provider) {
+        let server = mock_idp(jwks_body);
+        let provider = Provider::new(test_config(format!("{}{}", server.url(), DISCOVERY_PATH)))
+            .expect("provider should initialize");
         (server, provider)
     }
 
-    fn setup_provider_server_with_fixture_jwks() -> (mockito::ServerGuard, Provider, String) {
-        let mut server = mockito::Server::new();
-        let discovery_path = "/.well-known/openid-configuration";
-        let jwks_path = "/jwks";
-        let token_path = "/token";
+    fn setup_provider_server() -> (mockito::ServerGuard, Provider) {
+        setup_server_with_jwks(DUMMY_JWKS_JSON)
+    }
 
-        server
-            .mock("GET", discovery_path)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                "{{\"issuer\":\"{}\",\"authorization_endpoint\":\"{}/authorize\",\"token_endpoint\":\"{}{}\",\"jwks_uri\":\"{}{}\"}}",
-                server.url(),
-                server.url(),
-                server.url(),
-                token_path,
-                server.url(),
-                jwks_path
-            ))
-            .create();
-
-        server
-            .mock("GET", jwks_path)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(FIXTURE_JWKS_JSON)
-            .create();
-
-        let provider = Provider::new(test_config(format!("{}{}", server.url(), discovery_path)))
-            .expect("provider should initialize");
-
-        (server, provider, token_path.to_string())
+    fn setup_provider_server_with_fixture_jwks() -> (mockito::ServerGuard, Provider) {
+        setup_server_with_jwks(FIXTURE_JWKS_JSON)
     }
 
     fn cookie_pair_from_set_cookie(set_cookie: &str) -> String {
@@ -719,11 +746,15 @@ mod tests {
         encode(&header, claims, &key).expect("token should be signed")
     }
 
-    fn exchange_with_signed_token<F>(token_builder: F) -> String
+    /// Run the full code-for-session exchange with a token built by
+    /// `token_builder(nonce, issuer)`. Returns the resulting Set-Cookie value
+    /// plus the server and provider so callers can validate the session
+    /// against the provider that minted it.
+    fn exchange_with_signed_token<F>(token_builder: F) -> (String, mockito::ServerGuard, Provider)
     where
         F: FnOnce(&str, &str) -> String,
     {
-        let (mut server, provider, token_path) = setup_provider_server_with_fixture_jwks();
+        let (mut server, provider) = setup_provider_server_with_fixture_jwks();
         let start = provider
             .authorization_url("/protected?x=1")
             .expect("auth start should work");
@@ -736,7 +767,7 @@ mod tests {
         );
 
         let token_mock = server
-            .mock("POST", token_path.as_str())
+            .mock("POST", TOKEN_PATH)
             .match_header(
                 "content-type",
                 Matcher::Regex("application/x-www-form-urlencoded.*".to_string()),
@@ -756,7 +787,7 @@ mod tests {
         let result =
             provider.exchange_code_for_session("auth-code", &callback_url, Some(&cookie_header));
         token_mock.assert();
-        result
+        (result, server, provider)
     }
 
     #[test]
@@ -813,6 +844,7 @@ mod tests {
             "email": "user@example.test",
             "roles": ["admin", "viewer"],
             "profile": {"name": "User"},
+            "display_name": "Evil\r\nX-Injected: 1",
             "iat": now_secs() as i64,
             "exp": (now_secs() + 60) as i64
         });
@@ -838,52 +870,45 @@ mod tests {
         );
         assert_eq!(provider.claim(Some(&cookie_header), "missing"), "");
 
+        // Control characters are stripped from claim values (header-injection
+        // defense; the documented usage puts claims in HTTP headers).
+        assert_eq!(
+            provider.claim(Some(&cookie_header), "display_name"),
+            "EvilX-Injected: 1"
+        );
+
+        // exp is rewritten at creation to now + cookie_ttl (3600 in
+        // test_config), replacing the input's now + 60.
+        let exp: u64 = provider
+            .claim(Some(&cookie_header), "exp")
+            .parse()
+            .expect("exp claim should be numeric");
+        assert!(
+            exp > now_secs() + 3000 && exp <= now_secs() + 3600,
+            "exp should be rewritten to now + cookie_ttl, got {exp}"
+        );
+
+        // Expiry is enforced at read time. Encrypt directly with the cipher
+        // since create_session_cookie_from_claims would rewrite exp.
         let expired_claims = serde_json::json!({
             "sub": "123",
             "iat": now_secs() as i64,
             "exp": (now_secs() - 1) as i64
         });
-        let expired_cookie = provider
-            .create_session_cookie_from_claims(&expired_claims)
-            .expect("expired cookie still serializes");
-        let expired_header = cookie_pair_from_set_cookie(&expired_cookie);
+        let value = provider
+            .cookie_cipher
+            .encrypt_session(&expired_claims)
+            .expect("expired claims still encrypt");
+        let expired_header = format!("{}={value}", provider.config.cookie_name);
         assert!(!provider.session_valid(Some(&expired_header)));
     }
 
     #[test]
     fn exchange_code_failure_returns_empty_string() {
-        let mut server = mockito::Server::new();
-
-        let discovery_path = "/.well-known/openid-configuration";
-        let jwks_path = "/jwks";
-        let token_path = "/token";
-
-        server
-            .mock("GET", discovery_path)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                "{{\"issuer\":\"{}\",\"authorization_endpoint\":\"{}/authorize\",\"token_endpoint\":\"{}{}\",\"jwks_uri\":\"{}{}\"}}",
-                server.url(),
-                server.url(),
-                server.url(),
-                token_path,
-                server.url(),
-                jwks_path
-            ))
-            .create();
-
-        server
-            .mock("GET", jwks_path)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                "{\"keys\":[{\"kty\":\"RSA\",\"alg\":\"RS256\",\"kid\":\"test-key\",\"n\":\"AQAB\",\"e\":\"AQAB\"}]}",
-            )
-            .create();
+        let (mut server, provider) = setup_provider_server();
 
         let token_mock = server
-            .mock("POST", token_path)
+            .mock("POST", TOKEN_PATH)
             .match_header(
                 "content-type",
                 Matcher::Regex("application/x-www-form-urlencoded.*".to_string()),
@@ -902,9 +927,6 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body("{\"access_token\":\"abc\"}")
             .create();
-
-        let provider = Provider::new(test_config(format!("{}{}", server.url(), discovery_path)))
-            .expect("provider should initialize");
 
         let start = provider
             .authorization_url("/protected")
@@ -935,7 +957,7 @@ mod tests {
 
         let value = provider
             .cookie_cipher
-            .encrypt_json(&state_cookie, AAD_STATE)
+            .encrypt_state(&state_cookie)
             .expect("state cookie should encrypt");
         let cookie_header = format!("{}={value}", provider.config.state_cookie_name);
 
@@ -948,33 +970,9 @@ mod tests {
 
     #[test]
     fn provider_init_fails_for_invalid_cookie_secret() {
-        let mut server = mockito::Server::new();
+        let server = mock_idp(DUMMY_JWKS_JSON);
 
-        let discovery_path = "/.well-known/openid-configuration";
-        let jwks_path = "/jwks";
-
-        server
-            .mock("GET", discovery_path)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                "{{\"issuer\":\"{}\",\"authorization_endpoint\":\"{}/authorize\",\"token_endpoint\":\"{}/token\",\"jwks_uri\":\"{}{}\"}}",
-                server.url(),
-                server.url(),
-                server.url(),
-                server.url(),
-                jwks_path
-            ))
-            .create();
-
-        server
-            .mock("GET", jwks_path)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body("{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"a\",\"n\":\"AQAB\",\"e\":\"AQAB\"}]}")
-            .create();
-
-        let mut config = test_config(format!("{}{}", server.url(), discovery_path));
+        let mut config = test_config(format!("{}{}", server.url(), DISCOVERY_PATH));
         config.cookie_secret = "invalid".to_string();
         match Provider::new(config) {
             Ok(_) => panic!("provider init should fail on invalid cookie secret"),
@@ -984,7 +982,7 @@ mod tests {
 
     #[test]
     fn exchange_code_for_session_accepts_valid_signed_token() {
-        let set_cookie = exchange_with_signed_token(|nonce, issuer| {
+        let (set_cookie, _server, provider) = exchange_with_signed_token(|nonce, issuer| {
             let claims = json!({
                 "sub": "1234567890",
                 "email": "user@example.com",
@@ -1001,11 +999,21 @@ mod tests {
         assert_ne!(set_cookie, "");
         let cookie_header = cookie_pair_from_set_cookie(&set_cookie);
 
-        let (_server, provider) = setup_provider_server();
         assert!(provider.session_valid(Some(&cookie_header)));
         assert_eq!(
             provider.claim(Some(&cookie_header), "email"),
             "user@example.com"
+        );
+
+        // The token's exp was now + 300; the session exp must have been
+        // rewritten to now + cookie_ttl (3600).
+        let exp: u64 = provider
+            .claim(Some(&cookie_header), "exp")
+            .parse()
+            .expect("exp claim should be numeric");
+        assert!(
+            exp > now_secs() + 3000,
+            "session exp should come from cookie_ttl, not the token, got {exp}"
         );
     }
 
@@ -1023,7 +1031,7 @@ mod tests {
             });
             sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
         });
-        assert_eq!(expired, "");
+        assert_eq!(expired.0, "");
 
         let wrong_aud = exchange_with_signed_token(|nonce, issuer| {
             let claims = json!({
@@ -1037,7 +1045,7 @@ mod tests {
             });
             sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
         });
-        assert_eq!(wrong_aud, "");
+        assert_eq!(wrong_aud.0, "");
 
         let wrong_iss = exchange_with_signed_token(|nonce, _issuer| {
             let claims = json!({
@@ -1051,7 +1059,7 @@ mod tests {
             });
             sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
         });
-        assert_eq!(wrong_iss, "");
+        assert_eq!(wrong_iss.0, "");
 
         let wrong_signature = exchange_with_signed_token(|nonce, issuer| {
             let claims = json!({
@@ -1065,7 +1073,7 @@ mod tests {
             });
             sign_token_with_claims(&claims, FIXTURE_WRONG_RSA_PRIVATE_PEM, "test-key")
         });
-        assert_eq!(wrong_signature, "");
+        assert_eq!(wrong_signature.0, "");
 
         let missing_claims = exchange_with_signed_token(|nonce, _issuer| {
             let claims = json!({
@@ -1076,7 +1084,46 @@ mod tests {
             });
             sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
         });
-        assert_eq!(missing_claims, "");
+        assert_eq!(missing_claims.0, "");
+    }
+
+    #[test]
+    fn azp_rules_enforced() {
+        fn base_claims(nonce: &str, issuer: &str) -> Value {
+            json!({
+                "sub": "1234567890",
+                "iss": issuer,
+                "iat": now_secs() as i64,
+                "exp": (now_secs() + 300) as i64,
+                "nonce": nonce
+            })
+        }
+
+        // Multiple audiences without azp → rejected.
+        let no_azp = exchange_with_signed_token(|nonce, issuer| {
+            let mut claims = base_claims(nonce, issuer);
+            claims["aud"] = json!(["client-123", "other-client"]);
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_eq!(no_azp.0, "", "multiple audiences without azp must fail");
+
+        // Multiple audiences with matching azp → accepted.
+        let with_azp = exchange_with_signed_token(|nonce, issuer| {
+            let mut claims = base_claims(nonce, issuer);
+            claims["aud"] = json!(["client-123", "other-client"]);
+            claims["azp"] = json!("client-123");
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_ne!(with_azp.0, "", "matching azp must be accepted");
+
+        // azp present but not our client_id → rejected.
+        let wrong_azp = exchange_with_signed_token(|nonce, issuer| {
+            let mut claims = base_claims(nonce, issuer);
+            claims["aud"] = json!("client-123");
+            claims["azp"] = json!("other-client");
+            sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key")
+        });
+        assert_eq!(wrong_azp.0, "", "mismatched azp must fail");
     }
 
     #[test]
@@ -1093,7 +1140,7 @@ mod tests {
             .create_session_cookie_from_claims(&big_claims)
             .unwrap_err();
         assert!(
-            err.to_string().contains("exceeds 3072 bytes"),
+            err.to_string().contains(&format!("exceeds {MAX_CLAIMS_BYTES} bytes")),
             "expected size limit error, got: {err}"
         );
 
@@ -1117,7 +1164,7 @@ mod tests {
 
     #[test]
     fn jwks_refresh_on_unknown_kid() {
-        let (mut server, provider, token_path) = setup_provider_server_with_fixture_jwks();
+        let (mut server, provider) = setup_provider_server_with_fixture_jwks();
 
         // Parse the fixture JWKS to extract the RSA modulus/exponent.
         let fixture_jwks: Value = serde_json::from_str(FIXTURE_JWKS_JSON).unwrap();
@@ -1159,7 +1206,7 @@ mod tests {
         let token = sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "rotated-key");
 
         server
-            .mock("POST", token_path.as_str())
+            .mock("POST", TOKEN_PATH)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(format!(
@@ -1192,7 +1239,7 @@ mod tests {
         }
 
         // First failure: refresh_failures goes from 0 to 1, backoff = 2^0 = 1s.
-        let _ = provider.refresh_jwks(true);
+        let _ = provider.refresh_jwks();
         {
             let cache = provider.jwks_cache.lock().unwrap();
             assert_eq!(cache.refresh_failures, 1, "first failure should set count to 1");
@@ -1213,7 +1260,7 @@ mod tests {
         }
 
         // Second failure: refresh_failures goes from 1 to 2, backoff = 2^1 = 2s.
-        let _ = provider.refresh_jwks(true);
+        let _ = provider.refresh_jwks();
         {
             let cache = provider.jwks_cache.lock().unwrap();
             assert_eq!(cache.refresh_failures, 2, "second failure should set count to 2");
@@ -1232,7 +1279,7 @@ mod tests {
             cache.expires_at = 0;
         }
 
-        let _ = provider.refresh_jwks(true);
+        let _ = provider.refresh_jwks();
         {
             let cache = provider.jwks_cache.lock().unwrap();
             assert_eq!(cache.refresh_failures, 3, "third failure should set count to 3");
@@ -1252,7 +1299,7 @@ mod tests {
         // Encrypt a JSON array — should be rejected by the as_object() check.
         let array_value = provider
             .cookie_cipher
-            .encrypt_json(&json!(["not", "an", "object"]), AAD_SESSION)
+            .encrypt_session(&json!(["not", "an", "object"]))
             .expect("encrypt should succeed");
         let cookie_header = format!("{}={array_value}", provider.config.cookie_name);
         assert!(
@@ -1263,7 +1310,7 @@ mod tests {
         // Encrypt a plain string — also not an object.
         let string_value = provider
             .cookie_cipher
-            .encrypt_json(&json!("just a string"), AAD_SESSION)
+            .encrypt_session(&json!("just a string"))
             .expect("encrypt should succeed");
         let cookie_header = format!("{}={string_value}", provider.config.cookie_name);
         assert!(
@@ -1317,7 +1364,7 @@ mod tests {
 
     #[test]
     fn handle_backend_request_callback_success() {
-        let (mut server, provider, token_path) = setup_provider_server_with_fixture_jwks();
+        let (mut server, provider) = setup_provider_server_with_fixture_jwks();
 
         let start = provider
             .authorization_url("/protected?x=1")
@@ -1337,7 +1384,7 @@ mod tests {
         let token = sign_token_with_claims(&claims, FIXTURE_RSA_PRIVATE_PEM, "test-key");
 
         server
-            .mock("POST", token_path.as_str())
+            .mock("POST", TOKEN_PATH)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(format!(
@@ -1354,10 +1401,13 @@ mod tests {
             OidcBackendResponse::CallbackSuccess {
                 location,
                 session_set_cookie,
+                state_clear_cookie,
             } => {
                 assert_eq!(location, "/protected?x=1");
                 assert!(!session_set_cookie.is_empty());
                 assert!(session_set_cookie.contains("HttpOnly"));
+                assert!(state_clear_cookie.starts_with("__oidc_state_test="));
+                assert!(state_clear_cookie.contains("Max-Age=0"));
             }
             other => panic!("expected CallbackSuccess, got {other:?}"),
         }

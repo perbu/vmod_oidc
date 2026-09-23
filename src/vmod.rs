@@ -47,10 +47,12 @@ impl varnish::vcl::VclBackend<()> for OidcBackend {
             OidcBackendResponse::CallbackSuccess {
                 location,
                 session_set_cookie,
+                state_clear_cookie,
             } => {
                 beresp.set_status(302);
                 beresp.set_header("Location", &location)?;
                 beresp.set_header("Set-Cookie", &session_set_cookie)?;
+                beresp.set_header("Set-Cookie", &state_clear_cookie)?;
                 beresp.set_header("Cache-Control", "no-store")?;
             }
             OidcBackendResponse::Error { status } => {
@@ -125,7 +127,9 @@ mod oidc {
             cookie_secret: &str,
             /// Name of the session cookie. Defaults to `__oidc`.
             cookie_name: Option<&str>,
-            /// Session cookie lifetime. Defaults to 1 hour.
+            /// Session lifetime. The session's expiry is set to now + cookie_ttl
+            /// when it is created after a successful login, independent of the
+            /// ID token's own `exp`. Defaults to 1 hour.
             cookie_ttl: Option<Duration>,
             /// State cookie lifetime (used during the login flow). Defaults to 5 minutes.
             state_cookie_ttl: Option<Duration>,
@@ -172,7 +176,7 @@ mod oidc {
         /// The backend determines whether a request is a callback or a login redirect
         /// by comparing the request path against the configured `redirect_uri` path.
         pub unsafe fn backend(&self) -> VCL_BACKEND {
-            self.backend.vcl_ptr()
+            unsafe { self.backend.as_ref().vcl_ptr() }
         }
 
         /// Returns `TRUE` if the request carries a valid, non-expired session cookie.

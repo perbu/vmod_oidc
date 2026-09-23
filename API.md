@@ -25,7 +25,9 @@ import oidc;
 import oidc from "path/to/liboidc.so";
 ```
 
-### Constructor `oidc.provider(STRING discovery_url, STRING client_id, STRING client_secret, STRING redirect_uri, STRING cookie_secret, [STRING cookie_name], [DURATION cookie_ttl], [DURATION state_cookie_ttl], [BOOL cookie_secure], [STRING scopes])`
+## Object `provider`
+
+### Constructor `oidc.new(STRING discovery_url, STRING client_id, STRING client_secret, STRING redirect_uri, STRING cookie_secret, [STRING cookie_name], [DURATION cookie_ttl], [DURATION state_cookie_ttl], [BOOL cookie_secure], [STRING scopes])`
 
 Create a new OIDC provider by fetching and validating the discovery document
 and JWKS from the identity provider. This is called during `vcl_init`.
@@ -50,20 +52,22 @@ Must match the redirect URI registered with the provider.
 * `STRING cookie_secret`:
 A 32-byte secret used for AES-256-GCM encryption of session and
 state cookies. Accepts hex, base64, or base64url encoding.
-* `[STRING cookie_name]`:
+* `STRING cookie_name` (optional):
 Name of the session cookie. Defaults to `__oidc`.
-* `[DURATION cookie_ttl]`:
-Session cookie lifetime. Defaults to 1 hour.
-* `[DURATION state_cookie_ttl]`:
+* `DURATION cookie_ttl` (optional):
+Session lifetime. The session's expiry is set to now + cookie_ttl
+when it is created after a successful login, independent of the
+ID token's own `exp`. Defaults to 1 hour.
+* `DURATION state_cookie_ttl` (optional):
 State cookie lifetime (used during the login flow). Defaults to 5 minutes.
-* `[BOOL cookie_secure]`:
+* `BOOL cookie_secure` (optional):
 Whether to set the `Secure` flag on cookies. Defaults to `true`.
 Set to `false` only for local development over plain HTTP.
-* `[STRING scopes]`:
+* `STRING scopes` (optional):
 Space-separated list of OAuth scopes to request. Defaults to `"openid"`.
 Common additions: `"openid email profile"`.
 
-#### Method `BACKEND <object>.backend()`
+### Method `BACKEND <object>.backend()`
 
 Returns the built-in OIDC backend that generates redirect and error
 responses directly. Use this as `req.backend_hint` in `vcl_recv` for:
@@ -77,7 +81,7 @@ authorization endpoint with the appropriate state cookie.
 The backend determines whether a request is a callback or a login redirect
 by comparing the request path against the configured `redirect_uri` path.
 
-#### Method `BOOL <object>.session_valid()`
+### Method `BOOL <object>.session_valid()`
 
 Returns `TRUE` if the request carries a valid, non-expired session cookie.
 
@@ -89,7 +93,7 @@ The decrypted claims are cached for the lifetime of the request, so
 subsequent calls to `session_valid()` and `claim()` avoid redundant
 decryption.
 
-#### Method `STRING <object>.claim(STRING name)`
+### Method `STRING <object>.claim(STRING name)`
 
 Returns the value of a named claim from the session cookie.
 
@@ -108,7 +112,7 @@ set req.http.X-User-Sub   = google.claim("sub");
 * `STRING name`:
 The claim name to look up (e.g., `"email"`, `"sub"`, `"name"`).
 
-#### Method `STRING <object>.authorization_url()`
+### Method `STRING <object>.authorization_url()`
 
 Returns the full authorization URL to redirect the user to the identity
 provider. As a side effect, sets a short-lived state cookie on the response
@@ -120,19 +124,19 @@ and use the returned URL as the `Location` header for a 302 redirect.
 Returns an empty string on internal error (e.g., failed to set the
 state cookie on the response).
 
-#### Method `STRING <object>.callback_code()`
+### Method `STRING <object>.callback_code()`
 
 Extracts the `code` query parameter from the current callback request URL.
 
 Returns an empty string if the parameter is missing.
 
-#### Method `STRING <object>.callback_state()`
+### Method `STRING <object>.callback_state()`
 
 Extracts the `state` query parameter from the current callback request URL.
 
 Returns an empty string if the parameter is missing.
 
-#### Method `BOOL <object>.callback_state_valid()`
+### Method `BOOL <object>.callback_state_valid()`
 
 Validates the OIDC callback by checking that the `state` query parameter
 matches the value stored in the encrypted state cookie.
@@ -141,7 +145,7 @@ Returns `FALSE` if the state cookie is missing, expired, tampered with,
 or does not match the `state` parameter. This is a CSRF protection check
 and should be called before `exchange_code_for_session()`.
 
-#### Method `STRING <object>.exchange_code_for_session(STRING code)`
+### Method `STRING <object>.exchange_code_for_session(STRING code)`
 
 Exchanges an authorization code for an ID token, validates the token,
 and returns a `Set-Cookie` header value containing the encrypted session.
@@ -163,7 +167,7 @@ be set on the response (e.g., `set resp.http.Set-Cookie = ...`).
 The authorization code from the callback query string.
 Typically obtained via `callback_code()`.
 
-#### Method `STRING <object>.callback_redirect_target()`
+### Method `STRING <object>.callback_redirect_target()`
 
 Returns the original URL path the user was trying to access before
 being redirected to log in. This is extracted from the encrypted state

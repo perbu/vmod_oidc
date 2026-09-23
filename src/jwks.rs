@@ -7,6 +7,9 @@ use crate::OidcError;
 use crate::helpers::now_secs;
 
 const DEFAULT_JWKS_MAX_AGE_SECS: u64 = 300;
+// Upper bound on how long a JWKS response can pin itself in the cache; also
+// keeps a hostile `max-age` from overflowing the expiry arithmetic.
+const MAX_JWKS_MAX_AGE_SECS: u64 = 86_400;
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct DiscoveryDocument {
@@ -107,7 +110,8 @@ pub(crate) fn fetch_jwks_cache(
         .get(CACHE_CONTROL)
         .and_then(|h| h.to_str().ok())
         .and_then(parse_max_age)
-        .unwrap_or(DEFAULT_JWKS_MAX_AGE_SECS);
+        .unwrap_or(DEFAULT_JWKS_MAX_AGE_SECS)
+        .min(MAX_JWKS_MAX_AGE_SECS);
 
     let body: JwksDocument = response.json()?;
 
@@ -160,7 +164,7 @@ pub(crate) fn fetch_jwks_cache(
         keyed,
         unkeyed,
         total_keys,
-        expires_at: now_secs() + max_age,
+        expires_at: now_secs().saturating_add(max_age),
         refresh_failures: 0,
         backoff_until: 0,
     })

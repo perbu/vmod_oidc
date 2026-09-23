@@ -14,8 +14,6 @@ pub enum OidcError {
     Jwt(#[from] jsonwebtoken::errors::Error),
     #[error("invalid token: {0}")]
     InvalidToken(String),
-    #[error("internal error: {0}")]
-    Internal(String),
     #[error("invalid state")]
     InvalidState,
     #[error("crypto failure")]
