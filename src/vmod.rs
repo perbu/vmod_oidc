@@ -176,7 +176,7 @@ mod oidc {
         /// The backend determines whether a request is a callback or a login redirect
         /// by comparing the request path against the configured `redirect_uri` path.
         pub unsafe fn backend(&self) -> VCL_BACKEND {
-            self.backend.vcl_ptr()
+            unsafe { self.backend.as_ref().vcl_ptr() }
         }
 
         /// Returns `TRUE` if the request carries a valid, non-expired session cookie.
